@@ -1,0 +1,22 @@
+{
+  "name": "mininet-browser",
+  "productName": "MiniNet Browser",
+  "version": "1.4.2",
+  "description": "MiniNet Browser \u2014 the real web, plus a tiny internet of your own, built for AI agents.",
+  "main": "main.js",
+  "author": "Seyi",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-packager . MiniNetBrowser --platform=win32 --arch=x64 --icon=icon.ico --out=dist --overwrite --asar --ignore=^/dist --ignore=^/docs --ignore=^/\\.github --ignore=^/test"
+  },
+  "devDependencies": {
+    "electron": "38.8.6",
+    "@electron/packager": "18.4.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/veeno7/mininet-browser.git"
+  },
+  "homepage": "https://veeno7.github.io/mininet-browser/"
+}

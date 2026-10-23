@@ -1,0 +1,629 @@
+// MiniNet Browser — AI control engine.
+// One set of tools, used by: the built-in Orbit assistant, the local HTTP API,
+// and MCP (Claude Desktop, Claude Code, Cursor, any MCP client).
+// Tools can only act on web pages and user extensions — never on the app's own code or the user's files.
+const http = require('http');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { webContents } = require('electron');
+const ext = require('./extensions');
+
+let cfg = { enabled: true, port: 7811, token: '', mode: 'ask' };
+let cfgPath = '';
+let shellReq = null;       // (op, args) => Promise  — talks to the browser UI
+let notify = () => {};     // (event) => void        — activity feed for the UI
+let server = null;
+let paused = false;
+const log = [];
+
+/* ---------------- config ---------------- */
+function loadConfig(userData) {
+  cfgPath = path.join(userData, 'agent.json');
+  try { cfg = Object.assign(cfg, JSON.parse(fs.readFileSync(cfgPath, 'utf8'))); } catch {}
+  if (!cfg.token) cfg.token = crypto.randomBytes(24).toString('hex');
+  saveConfig();
+}
+function saveConfig() { try { fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2)); } catch {} }
+function getConfig() { return { ...cfg, paused, approved: [...approvals.entries()].map(([client, a]) => ({ client, plan: a.plan, since: a.t })), url: `http://127.0.0.1:${cfg.port}`, mcpUrl: `http://127.0.0.1:${cfg.port}/mcp`, running: !!(server && server.listening) }; }
+function setConfig(c) {
+  const portChanged = c.port && +c.port !== cfg.port;
+  if (typeof c.enabled === 'boolean') cfg.enabled = c.enabled;
+  if (c.port) cfg.port = Math.max(1024, Math.min(65535, +c.port || 7811));
+  if (c.mode === 'ask' || c.mode === 'auto') cfg.mode = c.mode;
+  if (c.revoke) approvals.delete(c.revoke);
+  if (c.revokeAll) approvals.clear();
+  if (c.regenerate) cfg.token = crypto.randomBytes(24).toString('hex');
+  saveConfig();
+  if (portChanged || 'enabled' in c) restart();
+  return getConfig();
+}
+function setPaused(p) { paused = !!p; notify({ type: 'paused', paused }); }
+
+/* ---------------- helpers ---------------- */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const text = t => ({ content: [{ type: 'text', text: typeof t === 'string' ? t : JSON.stringify(t, null, 2) }] });
+
+async function tabWC(tab) {
+  const tabs = await shellReq('list');
+  const t = tab == null ? tabs.find(x => x.active) : tabs.find(x => x.id === +tab);
+  if (!t) throw new Error(tab == null ? 'No active tab' : `No tab with id ${tab}. Use list_tabs.`);
+  const wc = t.wcId ? webContents.fromId(t.wcId) : null;
+  if (!wc || wc.isDestroyed()) throw new Error('That tab is not ready yet, try again in a moment.');
+  return { tab: t, wc };
+}
+async function waitLoad(wc, timeout = 15000) {
+  await sleep(250);
+  const start = Date.now();
+  while (wc.isLoading() && Date.now() - start < timeout) await sleep(150);
+  await sleep(150);
+}
+function js(wc, code) { return wc.executeJavaScript(code, true); }
+
+const SNAPSHOT_JS = (maxEl, maxText, start = 1) => `(() => {
+  if (innerWidth < 5 || innerHeight < 5) return null;
+  document.querySelectorAll('[data-mn-ref]').forEach(e => e.removeAttribute('data-mn-ref'));
+  const sel = 'a[href],button,input:not([type=hidden]),textarea,select,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=option],[role=switch],[role=textbox],[role=combobox],[role=searchbox],[contenteditable=""],[contenteditable=true],[onclick],[tabindex]:not([tabindex="-1"])';
+  const out = []; let n = ${start - 1}; const first = n;
+  const vis = e => { const r = e.getBoundingClientRect(); if (r.width < 2 || r.height < 2) return false; const s = getComputedStyle(e); return s.visibility !== 'hidden' && s.display !== 'none' && +s.opacity !== 0; };
+  for (const e of document.querySelectorAll(sel)) {
+    if (n - first >= ${maxEl}) break;
+    if (!vis(e)) continue;
+    n++; e.setAttribute('data-mn-ref', n);
+    const r = e.getBoundingClientRect();
+    const tag = e.tagName.toLowerCase();
+    const role = e.getAttribute('role') || (tag === 'input' ? (e.type || 'text') : '');
+    const lab = (e.labels && e.labels[0] && e.labels[0].innerText) || '';
+    let name = (e.getAttribute('aria-label') || (tag === 'input' || tag === 'textarea' || tag === 'select' ? (lab || e.placeholder || e.title || e.name) : (e.innerText || e.title || e.alt || e.value)) || '').trim().replace(/\\s+/g, ' ').slice(0, 90);
+    if (!name && e.querySelector('img[alt]')) name = e.querySelector('img[alt]').alt;
+    let line = '[' + n + '] ' + tag + (role ? '(' + role + ')' : '') + ' "' + name + '"';
+    if (tag === 'a') line += ' -> ' + (e.getAttribute('href') || '').slice(0, 100);
+    if ((tag === 'input' || tag === 'textarea' || tag === 'select') && e.value) line += ' value="' + String(e.value).slice(0, 60) + '"';
+    if (e.checked) line += ' [checked]';
+    if (e.disabled) line += ' [disabled]';
+    if (r.bottom < 0 || r.top > innerHeight) line += ' (offscreen)';
+    out.push(line);
+  }
+  const body = document.body ? document.body.innerText.replace(/\\n{3,}/g, '\\n\\n') : '';
+  return { title: document.title, url: location.href, elements: out, text: body.slice(0, ${maxText}), textLength: body.length,
+    scroll: { y: Math.round(scrollY), height: document.documentElement.scrollHeight, viewport: innerHeight } };
+})()`;
+
+function displayUrl(u) {
+  if (/mininet\/MiniNet\.html/.test(u)) return 'mini://' + decodeURIComponent((u.split('#')[1] || 'home.mini'));
+  if (/start\.html/.test(u)) return 'about:start';
+  if (/^data:/.test(u)) return u.slice(0, 40) + '…';
+  return u;
+}
+
+/* ---- frames: AI can see and use content inside iframes (MiniNet sites, embedded forms, payment boxes) ---- */
+const refFrames = new Map();   // webContents id -> Map(ref -> frame)
+function framesOf(wc) { try { return wc.mainFrame.framesInSubtree.filter(f => !f.detached); } catch { return [wc.mainFrame]; } }
+function fjs(frame, code) { return frame.executeJavaScript(code, true); }
+async function frameOffset(frame) {
+  let x = 0, y = 0, f = frame;
+  while (f.parent) {
+    const p = f.parent;
+    const idx = p.frames.findIndex(c => c.frameTreeNodeId === f.frameTreeNodeId);
+    const r = await fjs(p, `(() => { const el = [...document.querySelectorAll('iframe,frame')][${idx}]; if (!el) return null; const b = el.getBoundingClientRect(); return { x: b.left + el.clientLeft, y: b.top + el.clientTop }; })()`).catch(() => null);
+    if (!r) return null;
+    x += r.x; y += r.y; f = p;
+  }
+  return { x, y };
+}
+const LOCATE_JS = (ref, sel, label) => `(() => {
+  let e = null, bs = 3;
+  const ref = ${ref == null ? 'null' : +ref}, sel = ${JSON.stringify(sel || null)}, label = ${JSON.stringify(label || null)};
+  if (ref != null) e = document.querySelector('[data-mn-ref="' + ref + '"]');
+  else if (sel) { try { e = document.querySelector(sel); } catch (err) { return { error: 'Bad CSS selector: ' + err.message }; } }
+  else {
+    const want = label.trim().toLowerCase();
+    const cands = [...document.querySelectorAll('a,button,input,textarea,select,summary,label,[role],[onclick],[tabindex],li,span,div,h1,h2,h3,h4,p,td')]
+      .filter(el => { const b = el.getBoundingClientRect(); return b.width > 1 && b.height > 1 && getComputedStyle(el).visibility !== 'hidden'; });
+    const txt = el => (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || '').trim().replace(/\\s+/g, ' ').toLowerCase();
+    const score = el => { const t = txt(el); if (!t) return 0; if (t === want) return 3; if (t.startsWith(want)) return 2; if (t.includes(want)) return 1; return 0; };
+    let best = null; bs = 0;
+    for (const el of cands) { const sc = score(el); if (sc > bs || (sc === bs && sc > 0 && best && best.contains(el))) { best = el; bs = sc; } }
+    e = best && (best.closest('button,a,[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],label,summary,[onclick]') || best);
+  }
+  if (!e) return null;
+  document.querySelectorAll('[data-mn-target]').forEach(x => x.removeAttribute('data-mn-target'));
+  e.setAttribute('data-mn-target', '1');
+  e.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  const host = e.closest('button,a,[role=button],[role=link],label,summary,[onclick]') || e;
+  // try several points (multi-line links, odd shapes) and pick one that really hits the element
+  const pts = [];
+  for (const r of [...e.getClientRects()].slice(0, 6)) if (r.width > 1 && r.height > 1) pts.push([r.left + r.width / 2, r.top + r.height / 2], [r.left + Math.min(8, r.width / 2), r.top + r.height / 2]);
+  const b = e.getBoundingClientRect(); pts.push([b.left + b.width / 2, b.top + Math.min(b.height / 2, 20)], [b.left + 6, b.top + 6]);
+  let hit = null, firstTop = null;
+  for (const [x, y] of pts) {
+    if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+    const t = document.elementFromPoint(x, y);
+    if (!firstTop) firstTop = t;
+    if (t && (host.contains(t) || t.contains(host) && t === e)) { hit = [x, y]; break; }
+  }
+  let covered = null;
+  if (!hit) {
+    hit = pts[0] || [b.left + b.width / 2, b.top + b.height / 2];
+    const t = firstTop;
+    if (t) covered = (t.closest('[role=dialog],dialog,[aria-modal=true]') ? 'a dialog/popup: ' : '') + t.tagName.toLowerCase() + (t.id ? '#' + t.id : '') + ' "' + (t.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 60) + '"';
+  }
+  return { score: bs, x: hit[0], y: hit[1], tag: e.tagName.toLowerCase(), name: (e.innerText || e.value || e.getAttribute('aria-label') || e.placeholder || '').trim().slice(0, 60), covered };
+})()`;
+async function pointFor(wc, { ref, selector, x, y, text: label }) {
+  if (x != null && y != null) return { x: +x, y: +y, frame: wc.mainFrame };
+  if (ref == null && !selector && !label) throw new Error('Give a ref (from snapshot), visible text, a CSS selector, or x/y coordinates.');
+  const frames = ref != null ? [(refFrames.get(wc.id) || new Map()).get(+ref) || wc.mainFrame] : framesOf(wc);
+  let best = null;
+  for (const frame of frames) {
+    let r; try { r = await fjs(frame, LOCATE_JS(ref, selector, label)); } catch { continue; }
+    if (r && r.error) throw new Error(r.error);
+    if (!r) continue;
+    const off = frame.parent ? await frameOffset(frame) : { x: 0, y: 0 };
+    if (!off) continue;
+    const z = wc.getZoomFactor();
+    const cand = { score: r.score || 0, x: (r.x + off.x) * z, y: (r.y + off.y) * z, tag: r.tag, name: r.name, covered: r.covered, frame, inFrame: !!frame.parent };
+    if (!label) return cand;                       // ref/selector: first match wins
+    if (!best || cand.score > best.score) best = cand;
+    if (best.score === 3 && !best.inFrame) break;  // exact match on the main page
+  }
+  if (best) { if (best.inFrame) await fjs(best.frame, LOCATE_JS(ref, selector, label)).catch(() => {}); return best; }
+  throw new Error(ref != null ? `No element [${ref}] — take a new snapshot, the page may have changed.` : selector ? `Nothing matches selector ${selector}` : `No visible element with text "${label}"`);
+}
+// Clicks inside embedded frames are performed from inside the frame (as a real user gesture),
+// because the engine does not route simulated mouse events into isolated frames.
+const FRAME_CLICK_JS = (count, right) => `(() => {
+  let e = document.querySelector('[data-mn-target]'); if (!e) return false;
+  const b = e.getBoundingClientRect(); const o = { bubbles: true, cancelable: true, view: window, clientX: b.left + b.width / 2, clientY: b.top + b.height / 2, button: ${right ? 2 : 0} };
+  for (const t of ['pointerover', 'mouseover', 'pointerdown', 'mousedown']) e.dispatchEvent(new (t.startsWith('pointer') ? PointerEvent : MouseEvent)(t, o));
+  if (typeof e.focus === 'function') e.focus();
+  for (const t of ['pointerup', 'mouseup']) e.dispatchEvent(new (t.startsWith('pointer') ? PointerEvent : MouseEvent)(t, o));
+  ${right ? "e.dispatchEvent(new MouseEvent('contextmenu', o));" : "for (let i = 0; i < " + 1 + "; i++) e.click(); if (" + count + " > 1) e.dispatchEvent(new MouseEvent('dblclick', o));"}
+  return true; })()`;
+async function mouseClick(wc, p, { button = 'left', count = 1 } = {}) {
+  if (p.inFrame && p.frame) { await fjs(p.frame, FRAME_CLICK_JS(count, button === 'right')); return; }
+  const x = Math.round(p.x), y = Math.round(p.y);
+  wc.sendInputEvent({ type: 'mouseMove', x, y });
+  for (let c = 1; c <= count; c++) {
+    wc.sendInputEvent({ type: 'mouseDown', x, y, button, clickCount: c });
+    wc.sendInputEvent({ type: 'mouseUp', x, y, button, clickCount: c });
+  }
+}
+const KEYMAP = { enter: 'Enter', return: 'Enter', esc: 'Escape', escape: 'Escape', tab: 'Tab', backspace: 'Backspace', delete: 'Delete', space: 'Space',
+  up: 'Up', down: 'Down', left: 'Left', right: 'Right', arrowup: 'Up', arrowdown: 'Down', arrowleft: 'Left', arrowright: 'Right',
+  home: 'Home', end: 'End', pageup: 'PageUp', pagedown: 'PageDown' };
+function pressKey(wc, combo) {
+  const parts = String(combo).split('+').map(s => s.trim());
+  const keyName = parts.pop();
+  const mods = parts.map(m => ({ ctrl: 'control', control: 'control', cmd: 'meta', meta: 'meta', win: 'meta', alt: 'alt', shift: 'shift' }[m.toLowerCase()])).filter(Boolean);
+  const keyCode = KEYMAP[keyName.toLowerCase()] || (keyName.length === 1 ? keyName : keyName);
+  wc.sendInputEvent({ type: 'keyDown', keyCode, modifiers: mods });
+  if (keyCode === 'Enter') wc.sendInputEvent({ type: 'char', keyCode: '\r', modifiers: mods });
+  else if (keyName.length === 1 && !mods.some(m => m === 'control' || m === 'meta' || m === 'alt')) wc.sendInputEvent({ type: 'char', keyCode: keyName, modifiers: mods });
+  wc.sendInputEvent({ type: 'keyUp', keyCode, modifiers: mods });
+}
+function checkNavUrl(u) {
+  const s = String(u || '').trim();
+  if (/^(file|chrome|devtools|view-source):/i.test(s)) throw new Error('For safety, AI agents cannot open local files or internal browser pages.');
+  return s;
+}
+
+/* ---------------- tools ---------------- */
+const TAB = { tab: { type: 'integer', description: 'Tab id from list_tabs. Leave out to use the active tab.' } };
+const TOOLS = {
+  list_tabs: {
+    description: 'List open tabs with their ids, titles and addresses. The active tab is marked.',
+    schema: {}, run: async () => text((await shellReq('list')).map(t => ({ id: t.id, active: t.active, title: t.title, url: displayUrl(t.url), loading: t.loading })))
+  },
+  open_tab: {
+    description: 'Open a new tab. Accepts a web address (example.com), a search phrase, or a MiniNet address (chirp.mini / mini://bank.mini). Returns the new tab id.',
+    schema: { url: { type: 'string' }, background: { type: 'boolean', description: 'Open without switching to it' } }, required: ['url'],
+    run: async a => { const t = await shellReq('open', { url: checkNavUrl(a.url), background: !!a.background }); const wc = webContents.fromId(t.wcId); if (wc) await waitLoad(wc); return text({ opened: t.id, title: wc ? wc.getTitle() : '', url: wc ? displayUrl(wc.getURL()) : a.url }); }
+  },
+  navigate: {
+    description: 'Go to an address, search phrase or MiniNet address in a tab (active tab by default), and wait for it to load.',
+    schema: { url: { type: 'string' }, ...TAB }, required: ['url'],
+    run: async a => {
+      const { tab, wc } = await tabWC(a.tab);
+      const target = await shellReq('resolve', { url: checkNavUrl(a.url) });
+      let lastErr = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { await wc.loadURL(target); lastErr = null; break; }
+        catch (e) { lastErr = e; if (!/ERR_ABORTED|\(-3\)/.test(String(e.message))) break; await sleep(400); }
+      }
+      await waitLoad(wc);
+      const now = wc.getURL();
+      const sameDoc = target.split('#')[0] === now.split('#')[0];
+      if (lastErr && !sameDoc) throw new Error('Could not open ' + a.url + ': ' + String(lastErr.message).replace(/^.*?(ERR_[A-Z_]+).*$/s, '$1'));
+      return text({ tab: tab.id, title: wc.getTitle(), url: displayUrl(now) });
+    }
+  },
+  go_back: { description: 'Go back in a tab.', schema: { ...TAB }, run: async a => { const { wc } = await tabWC(a.tab); if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); await waitLoad(wc); return text({ url: displayUrl(wc.getURL()) }); } },
+  go_forward: { description: 'Go forward in a tab.', schema: { ...TAB }, run: async a => { const { wc } = await tabWC(a.tab); if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); await waitLoad(wc); return text({ url: displayUrl(wc.getURL()) }); } },
+  reload: { description: 'Reload a tab.', schema: { ...TAB }, run: async a => { const { wc } = await tabWC(a.tab); wc.reload(); await waitLoad(wc); return text('reloaded'); } },
+  switch_tab: { description: 'Make a tab the active (visible) tab.', schema: { tab: { type: 'integer' } }, required: ['tab'], run: async a => { await shellReq('activate', { id: +a.tab }); return text('ok'); } },
+  close_other_tabs: { description: 'Close every tab except one (the active tab unless you give keep).', schema: { keep: { type: 'integer', description: 'Tab id to keep' } },
+    run: async a => { const tabs = await shellReq('list'); const keep = a.keep != null ? +a.keep : (tabs.find(t => t.active) || tabs[0]).id; let n = 0; for (const t of tabs) if (t.id !== keep) { await shellReq('close', { id: t.id }); n++; } await shellReq('activate', { id: keep }); return text(`closed ${n} tabs, kept tab ${keep}`); } },
+  close_tab: { description: 'Close a tab.', schema: { tab: { type: 'integer' } }, required: ['tab'], run: async a => { await shellReq('close', { id: +a.tab }); return text('closed'); } },
+
+  snapshot: {
+    description: 'Read the page: title, address, numbered list of interactive elements like [12] button "Buy now", and the visible text — including content inside embedded frames. Use the numbers as ref in click/type. Take a fresh snapshot after the page changes.',
+    schema: { ...TAB, max_elements: { type: 'integer', description: 'Default 150' }, max_text: { type: 'integer', description: 'Characters of page text, default 4000' } },
+    run: async a => {
+      const { tab, wc } = await tabWC(a.tab);
+      const maxEl = Math.min(+a.max_elements || 150, 600), maxText = Math.min(+a.max_text || 4000, 60000);
+      const map = new Map(); let next = 1; let head = null; const els = []; const texts = [];
+      for (const f of framesOf(wc)) {
+        if (next - 1 >= maxEl) break;
+        let snap; try { snap = await fjs(f, SNAPSHOT_JS(maxEl - (next - 1), maxText, next)); } catch { continue; }
+        if (!snap) continue;
+        if (!head) head = snap;
+        else if (!snap.elements.length && !snap.text.trim()) continue;
+        const label = f.parent ? `  (inside embedded frame${/srcdoc|about:/.test(f.url) ? ': page content' : ': ' + f.url.slice(0, 60)})` : '';
+        snap.elements.forEach((line, i) => { map.set(next + i, f); els.push(line + (label && i === 0 ? label : '')); });
+        next += snap.elements.length;
+        texts.push((f.parent ? `\n--- embedded frame ${label.replace(/^\s+\(inside embedded frame:?\s?|\)$/g, '')} ---\n` : '') + snap.text);
+      }
+      refFrames.set(wc.id, map);
+      if (!head) throw new Error('Could not read this page (it may still be loading).');
+      return text(`TAB ${tab.id} · ${head.title}\nURL ${displayUrl(head.url)}\nSCROLL y=${head.scroll.y} of ${head.scroll.height} (viewport ${head.scroll.viewport})\n\nELEMENTS (${els.length}):\n${els.join('\n')}\n\nTEXT (${head.textLength} chars on main page):\n${texts.join('\n').slice(0, maxText + 2000)}`);
+    }
+  },
+  read_text: {
+    description: 'Get the readable text of the page (including embedded frames) or of one element (CSS selector). Good for long articles.',
+    schema: { ...TAB, selector: { type: 'string' }, offset: { type: 'integer' }, length: { type: 'integer', description: 'Default 20000' } },
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      let t = null;
+      if (a.selector) {
+        for (const f of framesOf(wc)) { t = await fjs(f, `(() => { const e = document.querySelector(${JSON.stringify(a.selector)}); return e ? e.innerText : null; })()`).catch(() => null); if (t != null) break; }
+        if (t == null) throw new Error('Nothing matches that selector');
+      } else {
+        const parts = [];
+        for (const f of framesOf(wc)) { const x = await fjs(f, 'document.body ? document.body.innerText : ""').catch(() => ''); if (x && x.trim()) parts.push((f.parent ? '\n--- embedded frame ---\n' : '') + x); }
+        t = parts.join('\n');
+      }
+      const off = +a.offset || 0, len = Math.min(+a.length || 20000, 100000);
+      return text(t.slice(off, off + len) + (t.length > off + len ? `\n\n[… ${t.length - off - len} more characters, use offset ${off + len}]` : ''));
+    }
+  },
+  click: {
+    description: 'Click an element with a real mouse click. Target it by ref from snapshot (best), by its visible text (e.g. text:"Reject all"), by CSS selector, or by x/y viewport coordinates. Waits for any page load it causes and warns if a popup was covering the target.',
+    schema: { ref: { type: 'integer' }, text: { type: 'string', description: 'Visible text of the thing to click' }, selector: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, double: { type: 'boolean' }, right: { type: 'boolean' }, ...TAB },
+    run: async a => {
+      const { wc } = await tabWC(a.tab); const p = await pointFor(wc, a);
+      const before = wc.getURL();
+      await mouseClick(wc, p, { count: a.double ? 2 : 1, button: a.right ? 'right' : 'left' }); await waitLoad(wc);
+      const out = { clicked: a.ref ?? a.text ?? a.selector ?? [a.x, a.y], element: p.tag ? `${p.tag} "${p.name || ''}"${p.inFrame ? ' (in embedded frame)' : ''}` : undefined, url: displayUrl(wc.getURL()), title: wc.getTitle(), navigated: wc.getURL() !== before };
+      if (p.covered) out.warning = `Something was covering the target, so the click landed on ${p.covered}. Close that popup/banner first (snapshot to find its button), then click again.`;
+      return text(out);
+    }
+  },
+  type: {
+    description: 'Type text into a field. Target the field by ref, CSS selector, or field (its label/placeholder text); it is cleared first unless append=true. Leave all out to type wherever the cursor is. submit=true presses Enter afterwards. Date/time fields take values like 2026-10-22 or 19:30.',
+    schema: { text: { type: 'string' }, ref: { type: 'integer' }, selector: { type: 'string' }, field: { type: 'string', description: 'Label or placeholder of the field' }, append: { type: 'boolean' }, submit: { type: 'boolean' }, ...TAB }, required: ['text'],
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      if (a.ref != null || a.selector || a.field) {
+        const p = await pointFor(wc, a.field && a.ref == null && !a.selector ? { text: a.field } : a);
+        const special = await fjs(p.frame, `(() => { let e = document.querySelector('[data-mn-target]'); if (e && e.tagName === 'LABEL' && e.control) e = e.control; if (!e || e.tagName !== 'INPUT') return false;
+          if (!/^(date|time|datetime-local|month|week|color|range)$/.test(e.type)) return false;
+          const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(e, ${JSON.stringify(String(a.text))});
+          e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); return e.type + '=' + e.value; })()`).catch(() => false);
+        if (special) return text({ set: special, note: special.endsWith('=') ? 'The value was rejected — use the format the field expects, e.g. 19:30 for time or 2026-10-22 for date.' : undefined });
+        if (p.inFrame) {
+          const ok = await fjs(p.frame, `(() => { let e = document.querySelector('[data-mn-target]'); if (e && e.tagName === 'LABEL' && e.control) e = e.control; if (!e) return false;
+            e.focus(); ${a.append ? '' : "if ('value' in e && typeof e.select === 'function') e.select(); else document.execCommand('selectAll');"}
+            if (!document.execCommand('insertText', false, ${JSON.stringify(String(a.text))})) { const proto = e.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; const d = Object.getOwnPropertyDescriptor(proto, 'value'); if (d) d.set.call(e, ${a.append ? "e.value + " : ""}${JSON.stringify(String(a.text))}); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); }
+            return true; })()`);
+          if (!ok) throw new Error('Could not focus that field');
+          if (a.submit) { await fjs(p.frame, `(() => { const e = document.activeElement; const o = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }; e.dispatchEvent(new KeyboardEvent('keydown', o)); e.dispatchEvent(new KeyboardEvent('keypress', o)); e.dispatchEvent(new KeyboardEvent('keyup', o)); if (e.form) { if (e.form.requestSubmit) e.form.requestSubmit(); else e.form.submit(); } })()`).catch(() => {}); await waitLoad(wc); }
+          return text({ typed: a.text.length + ' characters', inEmbeddedFrame: true, submitted: !!a.submit, url: displayUrl(wc.getURL()) });
+        }
+        await mouseClick(wc, p);
+        await sleep(30);
+        if (!a.append) await fjs(p.frame, `(() => { const e = document.activeElement; if (!e) return; if ('value' in e && typeof e.select === 'function') { e.select(); } else { document.execCommand('selectAll'); } })()`).catch(() => {});
+      }
+      wc.insertText(String(a.text));
+      if (a.submit) { await sleep(80); pressKey(wc, 'Enter'); await waitLoad(wc); }
+      return text({ typed: a.text.length + ' characters', submitted: !!a.submit, url: displayUrl(wc.getURL()) });
+    }
+  },
+  select_option: {
+    description: 'Choose an option in a <select> dropdown by its visible text or value.',
+    schema: { option: { type: 'string' }, ref: { type: 'integer' }, selector: { type: 'string' }, ...TAB }, required: ['option'],
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      const frames = a.ref != null ? [(refFrames.get(wc.id) || new Map()).get(+a.ref) || wc.mainFrame] : framesOf(wc);
+      const q = a.ref != null ? `[data-mn-ref="${+a.ref}"]` : a.selector;
+      let frame = frames[0];
+      for (const f of frames) { if (await fjs(f, `!!document.querySelector(${JSON.stringify(q)})`).catch(() => false)) { frame = f; break; } }
+      const r = await fjs(frame, `(() => { const s = document.querySelector(${JSON.stringify(q)}); if (!s || !s.options) return 'not a select';
+        const o = [...s.options].find(o => o.text.trim() === ${JSON.stringify(a.option)} || o.value === ${JSON.stringify(a.option)}) || [...s.options].find(o => o.text.toLowerCase().includes(${JSON.stringify(a.option.toLowerCase())}));
+        if (!o) return 'no such option. Options: ' + [...s.options].map(o => o.text.trim()).join(' | ');
+        s.value = o.value; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); return 'selected ' + o.text.trim(); })()`);
+      return text(r);
+    }
+  },
+  press_key: {
+    description: 'Press a key or combo, e.g. "Enter", "Escape", "Tab", "ArrowDown", "ctrl+a", "shift+Tab".',
+    schema: { key: { type: 'string' }, ...TAB }, required: ['key'],
+    run: async a => { const { wc } = await tabWC(a.tab); pressKey(wc, a.key); await waitLoad(wc, 8000); return text('pressed ' + a.key); }
+  },
+  scroll: {
+    description: 'Scroll the page. direction up/down (default one screen), or to top/bottom, or bring an element (ref/selector) into view.',
+    schema: { direction: { type: 'string', enum: ['up', 'down', 'top', 'bottom'] }, amount: { type: 'number', description: 'Pixels' }, ref: { type: 'integer' }, selector: { type: 'string' }, ...TAB },
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      if (a.ref != null || a.selector) { await pointFor(wc, a); return text('scrolled element into view'); }
+      const d = a.direction || 'down';
+      const y = await js(wc, d === 'top' ? 'scrollTo(0,0),scrollY' : d === 'bottom' ? 'scrollTo(0,document.documentElement.scrollHeight),scrollY'
+        : `scrollBy(0, ${(d === 'up' ? -1 : 1)} * ${+a.amount || 'innerHeight*0.85'}), scrollY`);
+      await sleep(200); return text({ scrollY: Math.round(y) });
+    }
+  },
+  hover: {
+    description: 'Move the mouse over an element (opens hover menus).',
+    schema: { ref: { type: 'integer' }, text: { type: 'string' }, selector: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, ...TAB },
+    run: async a => { const { wc } = await tabWC(a.tab); const p = await pointFor(wc, a); wc.sendInputEvent({ type: 'mouseMove', x: Math.round(p.x), y: Math.round(p.y) }); await sleep(300); return text('hovering'); }
+  },
+  screenshot: {
+    description: 'Take a picture of what the tab shows right now (JPEG).',
+    schema: { ...TAB, full_quality: { type: 'boolean' } },
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      let img = await wc.capturePage();
+      // resize to the page's own pixel grid so x/y read from the picture work directly with click/hover
+      const vw = await js(wc, 'innerWidth').catch(() => 0);
+      const cssW = vw ? Math.round(vw * wc.getZoomFactor()) : img.getSize().width;
+      const w = Math.min(cssW, 1400);
+      if (img.getSize().width !== w) img = img.resize({ width: w });
+      const scale = cssW / w;
+      return { content: [{ type: 'image', data: img.toJPEG(a.full_quality ? 90 : 70).toString('base64'), mimeType: 'image/jpeg' }, { type: 'text', text: `Screenshot of ${displayUrl(wc.getURL())} (${img.getSize().width}x${img.getSize().height}). ` + (scale === 1 ? 'Pixel positions in this picture can be used directly as click x/y.' : `Multiply picture positions by ${scale.toFixed(2)} to get click x/y.`) }] };
+    }
+  },
+  run_js: {
+    description: 'Run JavaScript inside the web page (not the browser itself) and return the result. The code is an expression or an async function body using "return".',
+    schema: { code: { type: 'string' }, ...TAB }, required: ['code'],
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      const code = /\breturn\b/.test(a.code) ? `(async () => { ${a.code} })()` : a.code;
+      let r = await js(wc, code);
+      try { r = JSON.stringify(r, null, 2); } catch { r = String(r); }
+      return text(r === undefined ? 'undefined' : String(r).slice(0, 50000));
+    }
+  },
+  wait_for: {
+    description: 'Wait until some text or a CSS selector appears on the page, or just wait some milliseconds.',
+    schema: { text: { type: 'string' }, selector: { type: 'string' }, ms: { type: 'integer' }, timeout: { type: 'integer', description: 'ms, default 10000' }, ...TAB },
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      if (!a.text && !a.selector) { await sleep(Math.min(+a.ms || 1000, 60000)); return text('waited'); }
+      const end = Date.now() + Math.min(+a.timeout || 10000, 120000);
+      while (Date.now() < end) {
+        const probe = a.selector ? `!!document.querySelector(${JSON.stringify(a.selector)})` : `!!(document.body && document.body.innerText.includes(${JSON.stringify(a.text)}))`;
+        for (const f of framesOf(wc)) { if (await fjs(f, probe).catch(() => false)) return text('found'); }
+        await sleep(250);
+      }
+      throw new Error('Timed out waiting');
+    }
+  },
+  download: {
+    description: 'Download a file from a link into the user\'s Downloads folder.',
+    schema: { url: { type: 'string' }, ...TAB }, required: ['url'],
+    run: async a => { const { wc } = await tabWC(a.tab); wc.downloadURL(checkNavUrl(a.url)); return text('download started — it will appear in the Downloads panel'); }
+  },
+  speak: {
+    description: 'Say something out loud to the user with the computer\'s voice.',
+    schema: { text: { type: 'string' } }, required: ['text'],
+    run: async a => { await shellReq('speak', { text: String(a.text).slice(0, 2000) }); return text('spoken'); }
+  },
+  show_message: {
+    description: 'Show a short pop-up message to the user in the browser.',
+    schema: { text: { type: 'string' } }, required: ['text'],
+    run: async a => { await shellReq('toast', { text: String(a.text).slice(0, 300) }); return text('shown'); }
+  },
+
+  request_permission: {
+    description: 'Ask the browser owner to approve your plan before you start acting. Describe in plain words what you will do (e.g. "Sign up on example.com with your email, accept cookies, and order the blue sneakers in size 43"). Once approved you can carry out the plan without asking again.',
+    schema: { plan: { type: 'string' } }, required: ['plan'],
+    run: async (a, client) => {
+      if (approvals.has(client) || cfg.mode === 'auto' || client === 'Orbit') { setApproved(client, a.plan); return text('Approved — go ahead.'); }
+      const r = await waitShort(prompt(client + ':approve', 'approve', { client, plan: String(a.plan).slice(0, 2000) }));
+      if (r === WAITING) return text('Still waiting — the owner has not pressed Allow yet in MiniNet Browser. Call request_permission again with the same plan to keep waiting.');
+      if (r && r.allow) { setApproved(client, a.plan); return text('The owner approved your plan. Go ahead and complete it without asking again.'); }
+      return { content: [{ type: 'text', text: 'The owner declined this plan.' + (r && r.reason ? ' They said: ' + r.reason : '') + ' Do not act; ask what they would like instead.' }], isError: true };
+    }
+  },
+  ask_user: {
+    description: 'Ask the browser owner a question mid-task and wait for their answer (e.g. which size, which account, whether to pay). Give options for quick buttons.',
+    schema: { question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, required: ['question'],
+    run: async (a, client) => {
+      const r = await waitShort(prompt(client + ':ask:' + a.question, 'ask', { client, question: String(a.question).slice(0, 1000), options: (a.options || []).slice(0, 6).map(String) }));
+      if (r === WAITING) return text('The owner has not answered yet. Call ask_user again with the same question to keep waiting.');
+      return text(r && r.answer ? 'The owner answered: ' + r.answer : 'The owner did not answer.');
+    }
+  },
+
+  list_extensions: { description: 'List installed MiniNet Browser extensions.', schema: {}, run: async () => text(ext.list()) },
+  get_extension: { description: 'Read an extension\'s manifest and code so you can change it.', schema: { id: { type: 'string' } }, required: ['id'], run: async a => text(ext.get(a.id)) },
+  save_extension: {
+    description: 'Create or update a browser extension. An extension is content.js (JavaScript run inside matching pages after they load) plus optional content.css. matches are address patterns like "*://*.youtube.com/*", "mini://*" or "<all_urls>". Pass an existing id to update it. Matching open tabs are reloaded so it takes effect.',
+    schema: { id: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' }, matches: { type: 'array', items: { type: 'string' } }, js: { type: 'string' }, css: { type: 'string' } },
+    required: ['name'],
+    run: async a => { const r = ext.save({ ...a, author: a.author || 'AI' }); ext.setEnabled(r.id, true); await shellReq('extensions-changed', { reload: true }); return text({ saved: r.id, ...r, enabled: true }); }
+  },
+  toggle_extension: { description: 'Turn an extension on or off.', schema: { id: { type: 'string' }, enabled: { type: 'boolean' } }, required: ['id', 'enabled'], run: async a => { ext.setEnabled(a.id, a.enabled); await shellReq('extensions-changed', { reload: true }); return text('ok'); } },
+  delete_extension: { description: 'Remove an extension.', schema: { id: { type: 'string' } }, required: ['id'], run: async a => { ext.remove(a.id); await shellReq('extensions-changed', {}); return text('deleted'); } }
+};
+
+function toolList() {
+  return Object.entries(TOOLS).map(([name, t]) => ({
+    name, description: t.description,
+    inputSchema: { type: 'object', properties: t.schema, ...(t.required ? { required: t.required } : {}) }
+  }));
+}
+
+function summarize(name, a) {
+  if (name === 'click') return a.ref != null ? `click [${a.ref}]` : a.text ? `click “${String(a.text).slice(0, 30)}”` : 'click';
+  if (name === 'type') return `type “${String(a.text || '').slice(0, 30)}”`;
+  if (name === 'navigate' || name === 'open_tab') return `${name === 'navigate' ? 'go to' : 'open'} ${String(a.url || '').slice(0, 50)}`;
+  if (name === 'save_extension') return `build extension “${a.name}”`;
+  return name.replace(/_/g, ' ');
+}
+
+const APPROVAL_WAIT = 10 * 60 * 1000;   // how long a card stays open
+const TOOL_WAIT = 80 * 1000;            // how long one tool call waits (tunnels cut requests at ~100s)
+const WAITING = Symbol('waiting');
+const prompts = new Map();              // key -> promise of the user's answer (card stays open across calls)
+function prompt(key, op, args) {
+  if (!prompts.has(key)) {
+    const p = shellReq(op, args, APPROVAL_WAIT).catch(() => null).finally(() => { if (prompts.get(key) === p) prompts.delete(key); });
+    prompts.set(key, p);
+  }
+  return prompts.get(key);
+}
+function waitShort(p) { return Promise.race([p, new Promise(r => setTimeout(() => r(WAITING), TOOL_WAIT))]); }
+const approvals = new Map();   // client -> { plan, t }
+const NO_APPROVAL_NEEDED = new Set(['list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
+function setApproved(client, plan) { approvals.set(client, { plan: plan || '', t: Date.now() }); notify({ type: 'approvals' }); }
+async function ensureApproved(client, name, args) {
+  if (cfg.mode === 'auto' || client === 'Orbit' || approvals.has(client) || NO_APPROVAL_NEEDED.has(name)) return;
+  const r = await waitShort(prompt(client + ':approve', 'approve', { client, plan: '', action: summarize(name, args || {}) }));
+  if (r === WAITING) throw new Error('Waiting for the owner to press Allow in MiniNet Browser. Try this action again in a moment (the request is still showing).');
+  if (r && r.allow) { if (!approvals.has(client)) setApproved(client, '(approved from first action: ' + summarize(name, args || {}) + ')'); return; }
+  throw new Error('The browser owner did not allow ' + client + ' to control the browser.' + (r && r.reason ? ' They said: ' + r.reason : '') + ' Use request_permission to explain your plan, then wait for approval.');
+}
+
+async function call(name, args = {}, client = 'AI agent') {
+  if (paused) throw new Error('The user has paused AI control of MiniNet Browser. Ask them to press Resume.');
+  const t = TOOLS[name];
+  if (!t) throw new Error(`Unknown tool ${name}`);
+  await ensureApproved(client, name, args);
+  const entry = { t: Date.now(), client, tool: name, summary: summarize(name, args || {}), ok: null };
+  log.unshift(entry); if (log.length > 200) log.pop();
+  notify({ type: 'activity', ...entry, status: 'start' });
+  try {
+    const r = await t.run(args || {}, client);
+    entry.ok = true; notify({ type: 'activity', ...entry, status: 'done' });
+    return r;
+  } catch (e) {
+    entry.ok = false; entry.error = e.message; notify({ type: 'activity', ...entry, status: 'error' });
+    throw e;
+  }
+}
+
+/* ---------------- HTTP + MCP server ---------------- */
+const INSTRUCTIONS = `You are controlling MiniNet Browser, the user's own web browser, on their behalf.
+Before acting, call request_permission with a short plain-language plan. Once the owner approves, carry the plan out fully by yourself — sign up, log in, accept or reject cookies, press Continue, fill forms — without asking again. If something comes up that the plan didn't cover, use ask_user.
+Typical loop: snapshot -> click/type using the [ref] numbers or visible text -> snapshot again to check. If a click warns that a popup covered the target, close the popup first.
+Addresses ending in .mini (e.g. chirp.mini, minimart.mini, bank.mini, build.mini) are sites inside MiniNet, the user's own mini-internet.
+You can also create browser extensions with save_extension. You cannot change the browser's own code.`;
+
+function allowedHost(req) {
+  const h = String(req.headers.host || '').toLowerCase();
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(h);
+}
+function authed(req, url) {
+  const h = req.headers.authorization || '';
+  const tok = h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-mininet-token'] || url.searchParams.get('token') || '');
+  const a = Buffer.from(String(tok)), b = Buffer.from(cfg.token);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function send(res, code, body, extra = {}) {
+  const s = typeof body === 'string' ? body : JSON.stringify(body);
+  res.writeHead(code, { 'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json', ...extra });
+  res.end(s);
+}
+function readBody(req) {
+  return new Promise((ok, bad) => { let d = ''; req.on('data', c => { d += c; if (d.length > 20e6) req.destroy(); }); req.on('end', () => ok(d)); req.on('error', bad); });
+}
+
+let clientNames = new Map();
+async function handleRpc(msg, sessionKey) {
+  const { id, method, params = {} } = msg;
+  const ok = result => ({ jsonrpc: '2.0', id, result });
+  const err = (code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
+  if (method === 'initialize') {
+    const name = (params.clientInfo && params.clientInfo.name) || 'MCP client';
+    clientNames.set(sessionKey, outsideName(prettyClient(name))); clientNames.set('default', outsideName(prettyClient(name)));
+    return ok({ protocolVersion: params.protocolVersion || '2025-06-18', capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: 'mininet-browser', title: 'MiniNet Browser', version: require('./package.json').version }, instructions: INSTRUCTIONS });
+  }
+  if (method && method.startsWith('notifications/')) return null;
+  if (method === 'ping') return ok({});
+  if (method === 'tools/list') return ok({ tools: toolList() });
+  if (method === 'tools/call') {
+    try { return ok(await call(params.name, params.arguments || {}, clientNames.get(sessionKey) || clientNames.get('default') || 'AI agent')); }
+    catch (e) { return ok({ content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true }); }
+  }
+  if (method === 'resources/list') return ok({ resources: [] });
+  if (method === 'prompts/list') return ok({ prompts: [] });
+  return id === undefined ? null : err(-32601, 'Method not found: ' + method);
+}
+// Outside programs can never pass themselves off as the built-in Orbit assistant
+function outsideName(n) { const t = String(n || 'AI agent').slice(0, 60).trim() || 'AI agent'; return /^\s*orbit\b/i.test(t) ? t + ' (outside app)' : t; }
+function prettyClient(n) {
+  const s = String(n).toLowerCase();
+  if (s.includes('mininet-bridge') && s.includes('claude')) return 'Claude Desktop';
+  if (s.includes('claude-code') || s.includes('claude code')) return 'Claude Code';
+  if (s.includes('claude')) return 'Claude';
+  if (s.includes('cursor')) return 'Cursor';
+  if (s.includes('chatgpt') || s.includes('openai')) return 'ChatGPT';
+  if (s.includes('mininet-bridge')) return String(n).replace(/\s*\(mininet-bridge\)/, '');
+  return n;
+}
+
+async function onRequest(req, res) {
+  const url = new URL(req.url, 'http://127.0.0.1');
+  if (!allowedHost(req)) return send(res, 403, { error: 'Only local connections are allowed' });
+  // Connector links carry the key in the path: /t/<key>/mcp
+  const tm = url.pathname.match(/^\/t\/([A-Za-z0-9]+)(\/.*)?$/);
+  if (tm) { url.searchParams.set('token', tm[1]); url.pathname = tm[2] || '/mcp'; }
+  // This server uses a secret key, not OAuth — tell clients there is nothing to discover
+  if (url.pathname.startsWith('/.well-known/')) return send(res, 404, { error: 'Not found' });
+  // Web pages inside a browser may not drive it unless they hold the secret key
+  if (req.headers.origin && !/^null$|^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.origin) && !authed(req, url)) return send(res, 403, { error: 'Requests from web pages are not allowed' });
+  if (url.pathname === '/' && req.method === 'GET') return send(res, 200, { name: 'MiniNet Browser agent API', mcp: '/mcp', tools: '/api/tools', auth: 'Authorization: Bearer <token from Settings → AI control>' });
+  if (!cfg.enabled) return send(res, 503, { error: 'AI control is switched off in MiniNet Browser settings' });
+  if (!authed(req, url)) return send(res, 401, { error: 'Missing or wrong token. Find it in MiniNet Browser → AI control.' });
+
+  if (url.pathname === '/mcp' || url.pathname === '/mcp/') {
+    if (req.method === 'GET') return send(res, 405, { error: 'Use POST' }, { Allow: 'POST' });
+    if (req.method === 'DELETE') return send(res, 200, {});
+    let body; try { body = JSON.parse(await readBody(req)); } catch { return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); }
+    const sid = req.headers['mcp-session-id'] || (Array.isArray(body) ? null : body.method === 'initialize' ? crypto.randomUUID() : null) || 'default';
+    const msgs = Array.isArray(body) ? body : [body];
+    const out = [];
+    for (const m of msgs) { const r = await handleRpc(m, sid); if (r) out.push(r); }
+    const hdr = { 'Mcp-Session-Id': sid };
+    if (!out.length) return send(res, 202, '', hdr);
+    return send(res, 200, Array.isArray(body) ? out : out[0], hdr);
+  }
+  if (url.pathname === '/api/tools' && req.method === 'GET') return send(res, 200, toolList());
+  const m = url.pathname.match(/^\/api\/tools\/([a-z_]+)$/);
+  if (m && req.method === 'POST') {
+    let args = {}; try { const b = await readBody(req); args = b ? JSON.parse(b) : {}; } catch { return send(res, 400, { error: 'Body must be JSON' }); }
+    try { return send(res, 200, { ok: true, ...(await call(m[1], args, outsideName(req.headers['x-agent-name'] || 'API client'))) }); }
+    catch (e) { return send(res, 400, { ok: false, error: e.message }); }
+  }
+  if (url.pathname === '/api/log') return send(res, 200, log.slice(0, 50));
+  send(res, 404, { error: 'Not found' });
+}
+
+function start() {
+  if (server || !cfg.enabled) return;
+  server = http.createServer((req, res) => onRequest(req, res).catch(e => send(res, 500, { error: e.message })));
+  server.on('error', e => { notify({ type: 'server', error: e.code === 'EADDRINUSE' ? `Port ${cfg.port} is busy — choose another in AI control settings` : e.message }); server = null; });
+  server.listen(cfg.port, '127.0.0.1', () => notify({ type: 'server', running: true }));
+}
+function stop() { if (server) { server.close(); server = null; } }
+function restart() { stop(); start(); }
+
+function init({ userData, shell, onEvent }) {
+  shellReq = shell; notify = onEvent || notify;
+  loadConfig(userData);
+  start();
+}
+
+module.exports = { init, call, toolList, getConfig, setConfig, setPaused, getLog: () => log.slice(0, 100), INSTRUCTIONS, displayUrl };

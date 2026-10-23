@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; img-src * data: blob: file:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>MiniNet Browser</title>
+<link rel="stylesheet" href="shell.css">
+</head>
+<body>
+  <!-- Title bar with tabs -->
+  <div id="top">
+    <div id="brand" title="MiniNet Browser"><img src="icon.png" alt=""></div>
+    <div id="tabs"></div>
+    <button id="newTab" class="ic" title="New tab (Ctrl+T)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    <div class="drag"></div>
+    <div id="winCtl">
+      <button data-win="min" title="Minimize"><svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg></button>
+      <button data-win="max" title="Maximize" id="maxBtn"><svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg></button>
+      <button data-win="close" title="Close" class="close"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+    </div>
+  </div>
+
+  <!-- Toolbar -->
+  <div id="toolbar">
+    <button class="ic" id="bBack" title="Back (Alt+←)"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+    <button class="ic" id="bFwd" title="Forward (Alt+→)"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
+    <button class="ic" id="bReload" title="Reload (Ctrl+R)"><svg viewBox="0 0 24 24" id="reloadIc"><path d="M19 12a7 7 0 1 1-2.05-4.95M19 4v4h-4"/></svg></button>
+    <button class="ic" id="bHome" title="Home (Alt+Home)"><svg viewBox="0 0 24 24"><path d="M4 11l8-6 8 6v8a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"/></svg></button>
+    <div id="omni">
+      <span id="badge" title=""></span>
+      <input id="addr" spellcheck="false" autocomplete="off" placeholder="Search the web, type an address, or go to a .mini site">
+      <button class="ic sm" id="bStar" title="Bookmark this page (Ctrl+D)"><svg viewBox="0 0 24 24"><path d="M12 4l2.4 5 5.4.6-4 3.7 1.1 5.4L12 16l-4.9 2.7 1.1-5.4-4-3.7 5.4-.6z"/></svg></button>
+      <div id="sugg"></div>
+    </div>
+    <button class="ic" id="bShield" title="Ad blocker"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4" class="okmark"/></svg><i id="shieldN"></i></button>
+    <button class="ic" id="bData" title="Data saver"><svg viewBox="0 0 24 24"><path d="M12 3c3 4 6 7.5 6 11a6 6 0 0 1-12 0c0-3.5 3-7 6-11z"/></svg></button>
+    <button class="ic" id="bDl" title="Downloads (Ctrl+J)"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><i id="dlDot"></i></button>
+    <button class="ic orbitbtn" data-panel="orbit" title="Orbit — your AI (Ctrl+K)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><ellipse cx="12" cy="12" rx="9.5" ry="4" transform="rotate(-20 12 12)"/><circle cx="19.6" cy="7.6" r="1.3" class="dot"/></svg></button>
+    <button class="ic" id="bMenu" title="Menu"><svg viewBox="0 0 24 24"><circle cx="12" cy="5.5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="18.5" r="1.4"/></svg></button>
+  </div>
+  <div id="bookbar"></div>
+
+  <div id="main">
+    <nav id="side">
+      <div id="sideSites"></div>
+      <div class="grow"></div>
+      <button class="sb" data-panel="orbit" title="Orbit — your AI assistant (Ctrl+K)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><ellipse cx="12" cy="12" rx="9.5" ry="4" transform="rotate(-20 12 12)"/><circle cx="19.6" cy="7.6" r="1.3" class="dot"/></svg></button>
+      <button class="sb" data-panel="agents" title="Connect AI agents (Claude, ChatGPT, Cursor…)"><svg viewBox="0 0 24 24"><path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0zM12 16v5"/></svg></button>
+      <button class="sb" data-panel="extensions" title="Extensions"><svg viewBox="0 0 24 24"><path d="M10 4h4v3a2 2 0 1 0 4 0V4h2v6h-3a2 2 0 1 0 0 4h3v6h-6v-3a2 2 0 1 0-4 0v3H4v-6h3a2 2 0 1 0 0-4H4V4h6z"/></svg></button>
+      <div class="sep"></div>
+      <button class="sb" data-panel="bookmarks" title="Bookmarks"><svg viewBox="0 0 24 24"><path d="M7 4h10v16l-5-3.5L7 20z"/></svg></button>
+      <button class="sb" data-panel="history" title="History (Ctrl+H)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg></button>
+      <button class="sb" data-panel="downloads" title="Downloads (Ctrl+J)"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg></button>
+      <button class="sb" data-panel="settings" title="Settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg></button>
+    </nav>
+    <div id="views">
+      <div id="findbar">
+        <input id="findIn" placeholder="Find in page">
+        <span id="findN"></span>
+        <button class="ic sm" id="findPrev" title="Previous"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
+        <button class="ic sm" id="findNext" title="Next"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+        <button class="ic sm" id="findClose" title="Close"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+      </div>
+      <div id="zoomTip"></div>
+      <div id="aiBar"><span class="pulse"></span><span id="aiText"></span><button id="aiStop">Stop AI</button></div>
+    </div>
+    <aside id="panel"><div id="panelHead"><b id="panelTitle"></b><button class="ic sm" id="panelClose"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button></div><div id="panelBody"></div></aside>
+  </div>
+
+  <div id="permWrap"></div>
+  <div id="menu"></div>
+  <div id="toast"></div>
+  <script src="shell.js"></script>
+  <script src="ai.js"></script>
+</body>
+</html>

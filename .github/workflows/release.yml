@@ -1,0 +1,46 @@
+name: Build & release (Windows)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install
+        run: npm ci
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          npx electron-packager . MiniNetBrowser --platform=win32 --arch=x64 --icon=icon.ico --out=dist --overwrite --asar `
+            --app-version=$version --app-copyright="Seyi" `
+            --win32metadata.CompanyName=MiniNet --win32metadata.ProductName="MiniNet Browser" `
+            --ignore="^/dist" --ignore="^/docs" --ignore="^/\.github" --ignore="^/test"
+          Rename-Item "dist/MiniNetBrowser-win32-x64/MiniNetBrowser.exe" "MiniNet Browser.exe"
+          Rename-Item "dist/MiniNetBrowser-win32-x64" "MiniNet Browser"
+          Compress-Archive -Path "dist/MiniNet Browser" -DestinationPath "dist/MiniNet-Browser-$version-win-x64.zip"
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "v$env:VERSION" }
+          $notes = "MiniNet Browser $env:VERSION for Windows (64-bit).`n`nUnzip and run **MiniNet Browser.exe**. If Windows says 'unknown publisher', choose More info -> Run anyway."
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) { gh release upload $tag "dist/MiniNet-Browser-$env:VERSION-win-x64.zip" --clobber }
+          else { gh release create $tag "dist/MiniNet-Browser-$env:VERSION-win-x64.zip" --title "MiniNet Browser $env:VERSION" --notes $notes }

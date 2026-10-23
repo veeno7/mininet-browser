@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>New tab</title>
+<style>
+:root{--bg0:#0c0822;--bg1:#150f33;--bg2:#1e1645;--bg3:#2c2263;--line:#2f2768;--ink:#f3efff;--mute:#a69fcc;--dim:#6f679a;
+  --sun:linear-gradient(120deg,#ff5e7a,#ff9a4d 55%,#ffd25e);--teal:#2ee6c5}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg0);color:var(--ink);font:14px/1.4 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif}
+body{background:
+  radial-gradient(900px 500px at 15% -10%,rgba(255,94,122,.18),transparent 60%),
+  radial-gradient(700px 500px at 100% 10%,rgba(46,230,197,.10),transparent 60%),
+  radial-gradient(800px 600px at 50% 120%,rgba(255,154,77,.12),transparent 60%),var(--bg0);min-height:100vh}
+.wrap{max-width:820px;margin:0 auto;padding:9vh 20px 40px;text-align:center}
+.hello{color:var(--mute);font-size:15px;letter-spacing:.02em}
+.clock{font-size:64px;font-weight:300;letter-spacing:-2px;margin:2px 0 22px;background:var(--sun);-webkit-background-clip:text;background-clip:text;color:transparent}
+.search{display:flex;align-items:center;gap:10px;background:var(--bg1);border:1px solid var(--line);border-radius:18px;padding:6px 6px 6px 18px;max-width:640px;margin:0 auto;box-shadow:0 20px 50px rgba(0,0,0,.35)}
+.search:focus-within{border-color:var(--teal);box-shadow:0 0 0 4px rgba(46,230,197,.12),0 20px 50px rgba(0,0,0,.35)}
+.search svg{width:20px;height:20px;stroke:var(--mute);fill:none;stroke-width:2;stroke-linecap:round}
+.search input{flex:1;background:none;border:0;outline:none;color:var(--ink);font:inherit;font-size:16px;padding:10px 0}
+.search input::placeholder{color:var(--dim)}
+.search button{border:0;border-radius:13px;padding:11px 18px;background:var(--sun);color:#2a0e1d;font-weight:700;font:inherit;font-weight:700;cursor:pointer}
+.eng{color:var(--dim);font-size:12px;margin-top:10px}
+.dial{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:14px;margin-top:42px}
+.d{position:relative;background:var(--bg1);border:1px solid var(--line);border-radius:18px;padding:18px 8px 12px;cursor:pointer;text-decoration:none;color:var(--ink);transition:transform .12s,border-color .12s}
+.d:hover{transform:translateY(-3px);border-color:#4a3f8f}
+.d img{width:34px;height:34px;border-radius:9px;background:#fff1;padding:3px}
+.d div{margin-top:8px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d .rm{position:absolute;top:6px;right:8px;color:var(--dim);display:none;font-size:15px;border:0;background:none;cursor:pointer}
+.d:hover .rm{display:block}
+.d.add{border-style:dashed;color:var(--mute)}
+.d.add span{font-size:30px;line-height:34px;display:block}
+.portal{display:flex;align-items:center;gap:20px;text-align:left;margin-top:34px;padding:20px 22px;border-radius:22px;cursor:pointer;
+  background:linear-gradient(120deg,rgba(255,94,122,.16),rgba(255,154,77,.10) 50%,rgba(46,230,197,.10));border:1px solid #3c2f7d;transition:transform .12s}
+.portal:hover{transform:translateY(-2px)}
+.portal img{width:64px;height:64px}
+.portal b{font-size:18px}
+.portal p{margin:3px 0 0;color:var(--mute)}
+.portal .go{margin-left:auto;background:var(--sun);color:#2a0e1d;border-radius:12px;padding:10px 16px;font-weight:700;white-space:nowrap}
+dialog{background:var(--bg1);color:var(--ink);border:1px solid var(--line);border-radius:16px;padding:20px;width:340px}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+dialog input{width:100%;background:var(--bg0);border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:9px 11px;font:inherit;margin:6px 0 12px;outline:none}
+dialog button{border:0;border-radius:10px;padding:9px 14px;font:inherit;cursor:pointer;background:var(--bg3);color:var(--ink)}
+dialog button.p{background:var(--sun);color:#2a0e1d;font-weight:700}
+@media (max-width:600px){.clock{font-size:46px}.portal{flex-wrap:wrap}.portal .go{margin-left:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hello" id="hello"></div>
+  <div class="clock" id="clock"></div>
+  <form class="search" id="f">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+    <input id="q" autofocus placeholder="Search the web, or type an address / .mini site">
+    <button>Go</button>
+  </form>
+  <div class="eng" id="eng"></div>
+  <div class="dial" id="dial"></div>
+  <div class="portal" id="portal">
+    <img src="icon.png" alt="">
+    <div><b>Enter MiniNet</b><p>Your own tiny internet: Chirp, Post, MiniMart, MiniBank, Wiki, Talk, Build and more. Everything stays on this computer.</p></div>
+    <span class="go">Open mini://home.mini</span>
+  </div>
+</div>
+<dialog id="dlg"><form method="dialog" id="df">
+  <b>Add a shortcut</b>
+  <input id="dName" placeholder="Name (e.g. Netflix)">
+  <input id="dUrl" placeholder="Address (e.g. netflix.com)" required>
+  <div style="display:flex;gap:8px;justify-content:flex-end"><button value="cancel" formnovalidate>Cancel</button><button class="p" value="ok">Add</button></div>
+</form></dialog>
+<script src="start.js"></script>
+</body>
+</html>

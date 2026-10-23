@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniNet Browser — the browser your AI can drive</title>
+<meta name="description" content="MiniNet Browser lets Claude, ChatGPT, Gemini and local AI models use the web for you — clicking, typing, shopping and building — while you approve and watch every step.">
+<meta property="og:title" content="MiniNet Browser — the browser your AI can drive">
+<meta property="og:description" content="The real web, plus a tiny internet of your own. Any AI can drive it. You stay in control.">
+<meta property="og:image" content="https://veeno7.github.io/mininet-browser/img/ai-driving.png">
+<link rel="icon" href="img/icon.png">
+<style>
+:root{--bg0:#0c0822;--bg1:#150f33;--bg2:#1e1645;--bg3:#2c2263;--line:#2f2768;--ink:#f3efff;--mute:#a69fcc;--dim:#6f679a;--sun:linear-gradient(120deg,#ff5e7a,#ff9a4d 55%,#ffd25e);--teal:#2ee6c5}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;overflow-x:hidden;background:var(--bg0);color:var(--ink);font:16px/1.6 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif}
+a{color:inherit}
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px}
+nav{display:flex;align-items:center;justify-content:space-between;padding:18px 0}
+nav .brand{display:flex;align-items:center;gap:10px;font-weight:700;text-decoration:none}
+nav .brand img{width:30px}
+nav .links{display:flex;gap:18px;align-items:center}
+nav .links a{color:var(--mute);text-decoration:none;font-size:15px}
+nav .links a:hover{color:var(--ink)}
+.btn{display:inline-flex;align-items:center;gap:8px;border-radius:14px;padding:13px 22px;font-weight:700;text-decoration:none;transition:transform .12s}
+.btn:hover{transform:translateY(-2px)}
+.btn.sun{background:var(--sun);color:#2a0e1d}
+.btn.ghost{border:1px solid var(--line);color:var(--ink);background:var(--bg1)}
+.hero{position:relative;text-align:center;padding:70px 0 40px}
+.hero::before{content:"";position:absolute;top:-160px;left:50%;transform:translateX(-50%);width:1600px;max-width:100vw;height:760px;pointer-events:none;background:radial-gradient(600px 300px at 30% 30%,rgba(255,94,122,.22),transparent 70%),radial-gradient(500px 300px at 75% 20%,rgba(46,230,197,.14),transparent 70%);z-index:-1}
+.pill{display:inline-block;border:1px solid var(--line);background:var(--bg1);color:var(--mute);border-radius:30px;padding:6px 14px;font-size:13px;margin-bottom:22px}
+.pill b{color:var(--teal)}
+h1{font-size:clamp(38px,6vw,68px);line-height:1.05;margin:0 0 18px;letter-spacing:-1.5px}
+h1 span{background:var(--sun);-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{font-size:clamp(17px,2vw,20px);color:var(--mute);max-width:700px;margin:0 auto 30px}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.small{color:var(--dim);font-size:13px;margin-top:12px}
+.shot{margin:46px auto 0;max-width:1000px;border-radius:18px;border:1px solid var(--line);box-shadow:0 40px 100px rgba(0,0,0,.55),0 0 0 1px rgba(46,230,197,.15);overflow:hidden}
+.shot img{display:block;width:100%}
+section{padding:70px 0}
+h2{font-size:clamp(28px,4vw,40px);margin:0 0 10px;letter-spacing:-.8px}
+.sub{color:var(--mute);margin:0 0 34px;max-width:680px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+.card{background:var(--bg1);border:1px solid var(--line);border-radius:18px;padding:22px}
+.card .ic{font-size:26px}
+.card h3{margin:10px 0 6px;font-size:18px}
+.card p{margin:0;color:var(--mute);font-size:15px}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:36px;align-items:center}
+.split img{width:100%;border-radius:16px;border:1px solid var(--line)}
+.steps{counter-reset:s;list-style:none;padding:0;margin:0}
+.steps li{position:relative;padding:0 0 18px 48px}
+.steps li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:32px;height:32px;border-radius:50%;background:var(--sun);color:#2a0e1d;font-weight:800;display:flex;align-items:center;justify-content:center}
+.steps b{display:block}
+.steps span{color:var(--mute);font-size:15px}
+.logos{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+.logos span{background:var(--bg2);border:1px solid var(--line);border-radius:30px;padding:7px 14px;font-size:14px}
+code{background:var(--bg2);border:1px solid var(--line);padding:2px 7px;border-radius:7px;font-size:14px}
+.pricing{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}
+.plan{background:var(--bg1);border:1px solid var(--line);border-radius:20px;padding:28px}
+.plan.pro{border-color:#ff9a4d;box-shadow:0 0 0 1px rgba(255,154,77,.3),0 30px 70px rgba(255,94,122,.12)}
+.plan h3{margin:0;font-size:20px}
+.price{font-size:40px;font-weight:800;margin:10px 0}
+.price small{font-size:15px;color:var(--mute);font-weight:400}
+.plan ul{padding:0;margin:16px 0 22px;list-style:none}
+.plan li{padding:6px 0;color:var(--mute)}
+.plan li::before{content:"✓ ";color:var(--teal);font-weight:700}
+.faq details{background:var(--bg1);border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin-bottom:10px}
+.faq summary{cursor:pointer;font-weight:600}
+.faq p{color:var(--mute);margin:10px 0 0}
+footer{border-top:1px solid var(--line);padding:30px 0;color:var(--dim);font-size:14px;text-align:center}
+@media (max-width:760px){.split{grid-template-columns:1fr}nav .links a.hide{display:none}section{padding:50px 0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="#"><img src="img/icon.png" alt="">MiniNet Browser</a>
+    <div class="links">
+      <a class="hide" href="#features">Features</a>
+      <a class="hide" href="#ai">Connect AI</a>
+      <a class="hide" href="#pricing">Pricing</a>
+      <a href="https://github.com/veeno7/mininet-browser">GitHub</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="pill"><b>New</b> · Works with Claude, ChatGPT, Gemini & local AI</div>
+    <h1>The browser your <span>AI can drive</span>.<br>With you in control.</h1>
+    <p class="lead">MiniNet Browser lets your AI use the web for you — search, click, fill forms, shop, post and build — while you approve the plan and watch every step.</p>
+    <div class="cta">
+      <a class="btn sun" href="https://github.com/veeno7/mininet-browser/releases/latest">⬇ Download for Windows</a>
+      <a class="btn ghost" href="https://github.com/veeno7/mininet-browser">★ Star on GitHub</a>
+    </div>
+    <div class="small">Free & open source · Windows 10/11 · macOS coming soon</div>
+    <div class="shot"><img src="img/ai-driving.png" alt="An AI agent driving MiniNet Browser"></div>
+  </header>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <h2>Everything a browser needs. Built for AI.</h2>
+    <p class="sub">A fast, beautiful everyday browser — that any AI agent can also use, safely.</p>
+    <div class="grid">
+      <div class="card"><div class="ic">🤖</div><h3>Any AI can drive it</h3><p>Claude Desktop, Claude Code, claude.ai, ChatGPT, Cursor, Codex, Gemini, Ollama — or your own scripts — through MCP or a simple API.</p></div>
+      <div class="card"><div class="ic">✋</div><h3>You approve first</h3><p>The AI shows its plan. Allow once, always, or deny. A glowing outline and a “Stop AI” bar show exactly what it’s doing.</p></div>
+      <div class="card"><div class="ic">🪐</div><h3>Orbit assistant</h3><p>A built-in AI with your own key — or free and private with Ollama. Talk to it by voice.</p></div>
+      <div class="card"><div class="ic">🌍</div><h3>MiniNet inside</h3><p>A whole mini-internet: social network, email, shop, bank, wiki, chat, games and a website builder — a safe playground for people and agents.</p></div>
+      <div class="card"><div class="ic">🧩</div><h3>AI-made extensions</h3><p>“Build me an extension that…” — your AI writes it and it appears. Cookie auto-reject, pop-up closer and more included.</p></div>
+      <div class="card"><div class="ic">🔒</div><h3>Locked core</h3><p>AI can only act on web pages and extensions. It can’t change the browser, read your files, or open local file pages.</p></div>
+      <div class="card"><div class="ic">🛡️</div><h3>Ad blocker & data saver</h3><p>Pages load faster and use less mobile data. Block images and videos with one tap when data is expensive.</p></div>
+      <div class="card"><div class="ic">🎨</div><h3>Your style</h3><p>Tabs, sidebar apps, bookmarks, history, downloads, start page shortcuts and five themes.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="ai" style="background:var(--bg1);border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+  <div class="wrap split">
+    <div>
+      <h2>Connect your AI in one minute</h2>
+      <p class="sub">Open the 🔌 AI control panel and pick your AI.</p>
+      <ol class="steps">
+        <li><b>Claude Desktop</b><span>Press “Connect Claude Desktop”, restart Claude.</span></li>
+        <li><b>claude.ai & ChatGPT</b><span>Press “Create connector link” and add it as a custom connector.</span></li>
+        <li><b>Developers</b><span>Copy the MCP config, or call <code>POST /api/tools/click</code> from your own agent.</span></li>
+      </ol>
+      <div class="logos"><span>Claude</span><span>ChatGPT</span><span>Gemini</span><span>Cursor</span><span>Codex</span><span>Ollama</span><span>OpenRouter</span><span>Groq</span></div>
+    </div>
+    <img src="img/permission.png" alt="Approval card: Claude wants to use your browser">
+  </div>
+</section>
+
+<section>
+  <div class="wrap split">
+    <img src="img/orbit.png" alt="Orbit buying the cheapest laptop on MiniMart">
+    <div>
+      <h2>Just ask. It does the clicking.</h2>
+      <p class="sub">“Find the cheapest laptop on MiniMart and buy it.” “Summarise this page.” “Post on Chirp that I’m live.” Orbit reads the page, clicks, types and reports back — step by step.</p>
+      <a class="btn ghost" href="https://github.com/veeno7/mininet-browser#connect-your-ai">See all 31 AI tools →</a>
+    </div>
+  </div>
+</section>
+
+<section id="pricing">
+  <div class="wrap">
+    <h2>Pricing</h2>
+    <p class="sub">The browser is free forever. Pro is for power users and teams building AI agents.</p>
+    <div class="pricing">
+      <div class="plan">
+        <h3>Free</h3>
+        <div class="price">$0</div>
+        <ul><li>The full browser</li><li>Connect any AI</li><li>Orbit with your own key or Ollama</li><li>Extensions & MiniNet</li></ul>
+        <a class="btn ghost" href="https://github.com/veeno7/mininet-browser/releases/latest">Download</a>
+      </div>
+      <div class="plan pro">
+        <h3>Pro <span style="font-size:13px;color:#ffd25e">· coming soon</span></h3>
+        <div class="price" style="font-size:28px">Coming soon</div>
+        <ul><li>Permanent connector link</li><li>Cloud MiniNet — shared with friends & teams</li><li>Agent playground: tasks, scores & resets</li><li>Priority support</li></ul>
+        <a class="btn sun" href="https://github.com/veeno7/mininet-browser/issues/new?title=Pro%20waitlist&body=I%27d%20like%20MiniNet%20Pro%20for%3A%20">Join the waitlist</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="faq">
+  <div class="wrap">
+    <h2>Questions</h2>
+    <details><summary>Is it safe to let an AI use my browser?</summary><p>You approve each AI before it acts (or choose “Always allow” for ones you trust). You can see everything it does and press Stop AI any time. AI tools can’t touch the browser’s own code, your files, or local pages.</p></details>
+    <details><summary>Which AI do I need?</summary><p>Any. Connect Claude, ChatGPT, Gemini, Cursor or Codex — or use the built-in Orbit assistant with a free local model through Ollama.</p></details>
+    <details><summary>What is MiniNet?</summary><p>A tiny internet built into the browser — Chirp (social), Post (email), MiniMart (shop), MiniBank, MiniWiki, Talk, games and a website builder. It’s a safe place to try AI agents before letting them loose on the real web.</p></details>
+    <details><summary>Windows says “unknown publisher”.</summary><p>That’s normal for new apps that aren’t code-signed yet. Click <i>More info → Run anyway</i>. A signed installer is on the roadmap.</p></details>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">MiniNet Browser · MIT licensed · Made by Seyi · <a href="https://github.com/veeno7/mininet-browser">GitHub</a></div>
+</footer>
+</body>
+</html>

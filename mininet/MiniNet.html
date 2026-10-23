@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniNet</title>
+<style>
+:root{--chrome:#150f33;--chrome2:#221a4d;--ink:#f3efff;--mute:#a69fcc;--acc:#2ee6c5;--bad:#f87171}
+body.embedded #bBack,body.embedded #bFwd,body.embedded #bReload,body.embedded #bHome,body.embedded #addr,body.embedded #bStar{display:none}
+body.embedded #bar .sp{flex:1}
+#bar .sp{display:none}body.embedded #bar .sp{display:block}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0f1116;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+#app{display:flex;flex-direction:column;height:100vh}
+#bar{background:var(--chrome);color:var(--ink);display:flex;gap:6px;align-items:center;padding:8px 10px;flex-wrap:wrap}
+#bar button{background:var(--chrome2);color:var(--ink);border:0;border-radius:8px;padding:7px 10px;cursor:pointer;font-size:14px}
+#bar button:hover{background:#353a4b}
+#addr{flex:1;min-width:160px;background:#0f1116;color:var(--ink);border:1px solid #333849;border-radius:20px;padding:8px 14px;font-size:14px;outline:none}
+#addr:focus{border-color:var(--acc)}
+#logo{font-weight:800;letter-spacing:.5px;color:var(--acc);margin-right:4px}
+#marks{background:var(--chrome2);display:flex;gap:4px;padding:5px 10px;overflow-x:auto;white-space:nowrap}
+#marks::-webkit-scrollbar{display:none}
+#marks a{color:var(--mute);font-size:13px;padding:3px 8px;border-radius:6px;cursor:pointer;text-decoration:none}
+#marks a:hover{color:var(--ink);background:#353a4b}
+#status{background:var(--chrome);color:var(--mute);font-size:12px;padding:4px 12px;display:flex;justify-content:space-between}
+#page{flex:1;overflow:auto;background:#fff;color:#1c1f26;position:relative}
+.wrap{max-width:900px;margin:0 auto;padding:24px 16px;overflow-wrap:anywhere}
+.btn{background:#1c1f26;color:#fff;border:0;border-radius:8px;padding:9px 14px;cursor:pointer;font-size:14px}
+.btn.alt{background:#e7e9ef;color:#1c1f26}
+.btn:disabled{opacity:.5;cursor:default}
+input.f,textarea.f,select.f{width:100%;padding:9px 11px;border:1px solid #cfd3dd;border-radius:8px;font:inherit;font-size:14px;margin:4px 0 10px}
+textarea.f{min-height:90px;resize:vertical}
+.card{border:1px solid #e3e6ee;border-radius:12px;padding:14px;margin:10px 0;background:#fff}
+.muted{color:#6b7183;font-size:13px}
+.lnk{color:#2459d6;cursor:pointer;text-decoration:underline}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.tile{border-radius:14px;padding:16px;cursor:pointer;color:#fff;min-height:96px;transition:transform .1s}
+.tile:hover{transform:translateY(-2px)}
+.tile b{font-size:17px;display:block}
+.tile span{font-size:13px;opacity:.9}
+h1,h2,h3{margin:.3em 0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.pill{display:inline-block;background:#eef0f5;border-radius:20px;padding:2px 9px;font-size:12px;margin:2px}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:9;padding:16px}
+#modal .box{background:#fff;border-radius:14px;padding:20px;max-width:420px;width:100%}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#1c1f26;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;display:none;z-index:10}
+iframe.usersite{border:0;width:100%;height:100%;display:block;background:#fff}
+@media (max-width:600px){#logo{display:none}#bar button{padding:7px 8px}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <span id="logo">◉ MiniNet</span>
+    <button id="bBack" title="Back">◀</button>
+    <button id="bFwd" title="Forward">▶</button>
+    <button id="bReload" title="Reload">⟳</button>
+    <button id="bHome" title="Home">⌂</button>
+    <input id="addr" spellcheck="false" placeholder="Type an address like chirp.mini, or search…">
+    <button id="bStar" title="Bookmark this page">☆</button>
+    <span class="sp"></span><button id="bUser">Sign in</button>
+    <button id="bMenu" title="Menu">☰</button>
+  </div>
+  <div id="marks"></div>
+  <div id="page"></div>
+  <div id="status"><span id="stLeft">Ready</span><span id="stRight"></span></div>
+</div>
+<div id="modal"><div class="box" id="mbox"></div></div>
+<div id="toast"></div>
+
+<!-- The whole world can be saved into this file. Saved data lives in the script tag below. -->
+<script id="world-data" type="application/json">null</script>
+
+<script>
+/* ================= STORAGE ================= */
+const KEY = 'mininet-world-v1';
+const BOTS = {
+  ada:{name:'ada',bio:'Loves maths, poetry and old machines.',bot:1},
+  kemi:{name:'kemi',bio:'Music head. Afrobeats all day.',bot:1},
+  tunde:{name:'tunde',bio:'Trader. Talks markets 24/7.',bot:1},
+  zara:{name:'zara',bio:'Designer and builder of tiny websites.',bot:1},
+  newsbot:{name:'newsbot',bio:'Automated reporter for MiniNet.',bot:1}
+};
+function freshWorld(){
+  const users={}; for(const k in BOTS) users[k]={...BOTS[k],balance:5000,joined:Date.now()};
+  users.shop={name:'shop',bio:'MiniMart store account.',bot:1,balance:0,joined:Date.now()};
+  return {
+    v:1, created:Date.now(), me:null, users,
+    posts:[
+      {id:id(),by:'zara',text:'Welcome to MiniNet! Everything here lives inside one file. Go build a site at build.mini 🛠️',t:Date.now()-3600e3,likes:['ada','kemi'],comments:[{by:'ada',text:'One file. An entire internet. Wild.',t:Date.now()-3000e3}]},
+      {id:id(),by:'kemi',text:'Anyone else listening to music while browsing? Join #music on talk.mini',t:Date.now()-1800e3,likes:['tunde'],comments:[]},
+      {id:id(),by:'tunde',text:'MiniCoin (₥) is up 4% today. Just kidding, it is always worth exactly one MiniCoin.',t:Date.now()-900e3,likes:[],comments:[]}
+    ],
+    mail:[], wiki:{}, sites:{
+      'zara.mini':{owner:'zara',title:"Zara's Corner",html:`<style>body{font-family:Georgia,serif;background:#fdf6ec;color:#3b2f2f;padding:30px;max-width:640px;margin:auto}a{color:#b45309}</style>
+<h1>Zara's Corner 🌸</h1><p>Hi! I'm Zara. This is my tiny site on MiniNet.</p><p>Things I like: colours, type, and websites that fit in one file.</p>
+<p>Visit my friends: <a href="chirp.mini">Chirp</a> · <a href="wiki.mini">the wiki</a> · <a href="build.mini">make your own site</a></p>`,t:Date.now()-7200e3,views:3}
+    },
+    chat:{general:[{by:'ada',text:'Hello everyone 👋',t:Date.now()-600e3}],music:[{by:'kemi',text:'Drop your favourite song of the week!',t:Date.now()-500e3}],builders:[{by:'zara',text:'Show me what you built today.',t:Date.now()-400e3}]},
+    tx:[], cart:[], events:[{t:Date.now()-7200e3,text:'zara.mini was published by zara'}],
+    bookmarks:['home.mini','find.mini','chirp.mini','post.mini','minimart.mini','bank.mini','wiki.mini','news.mini','talk.mini','build.mini','play.mini'],
+    stats:{visits:0}
+  };
+}
+function id(){return Math.random().toString(36).slice(2,10)}
+let W;
+function load(){
+  let local=null; try{local=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
+  let embedded=null; try{embedded=JSON.parse(document.getElementById('world-data').textContent)}catch(e){}
+  W = (local && embedded) ? ((embedded.savedAt||0)>(local.savedAt||0)?embedded:local) : (local||embedded||freshWorld());
+}
+let warnedFull=false;
+function save(){ W.savedAt=Date.now(); try{localStorage.setItem(KEY,JSON.stringify(W))}catch(e){ if(!warnedFull){warnedFull=true;setTimeout(()=>toast('Storage is full — open ☰ and save your world into a file'),0)} } }
+load();
+
+/* ================= HELPERS ================= */
+const $=s=>document.querySelector(s);
+const page=$('#page');
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function ago(t){const s=(Date.now()-t)/1000;if(s<60)return 'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
+function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',2600)}
+function me(){return W.me?W.users[W.me]:null}
+function event(text){W.events.unshift({t:Date.now(),text});W.events=W.events.slice(0,200)}
+function needLogin(){ if(W.me) return false; signInModal(); return true }
+function modal(html){$('#mbox').innerHTML=html;$('#modal').style.display='flex'}
+function closeModal(){$('#modal').style.display='none'}
+$('#modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal()});
+function user(n){return `<span class="lnk" data-go="people.mini/${esc(n)}">@${esc(n)}</span>`}
+function sendMail(from,to,subject,body){W.mail.unshift({id:id(),from,to,subject,body,t:Date.now(),read:false})}
+function pick(a){return a[Math.floor(Math.random()*a.length)]}
+function later(fn,ms){setTimeout(()=>{fn();save();if(typeof rerenderIf==='function')rerenderIf()},ms)}
+
+/* ================= BROWSER ================= */
+let hist=[], hpos=-1, cur='home.mini';
+function normalize(input){
+  let s=String(input||'').trim(); if(!s) return 'home.mini';
+  s=s.replace(/^mini:\/\//,'').replace(/^https?:\/\//,'');
+  const host=s.split(/[/?]/)[0].toLowerCase();
+  if(host.endsWith('.mini')) return host+s.slice(host.length);
+  if(!s.includes(' ') && (SITES[host+'.mini']||W.sites[host+'.mini'])) return host+'.mini'+s.slice(host.length);
+  return 'find.mini/?q='+encodeURIComponent(s);
+}
+function go(input,push=true){
+  const url=normalize(input);
+  if(push){hist=hist.slice(0,hpos+1);hist.push(url);hpos=hist.length-1}
+  cur=url; render();
+}
+function parse(url){
+  const m=url.match(/^([^/?]+)(\/[^?]*)?(\?.*)?$/)||[];
+  const host=(m[1]||'').toLowerCase(), path=(m[2]||'/').replace(/^\//,''), q=new URLSearchParams(m[3]||'');
+  return {host,path,q};
+}
+function render(){
+  const {host,path,q}=parse(cur);
+  $('#addr').value='mini://'+cur;
+  $('#bStar').textContent=W.bookmarks.includes(cur)?'★':'☆';
+  W.stats.visits++;
+  page.scrollTop=0;
+  let title;
+  if(SITES[host]){ title=SITES[host].render(path,q)||SITES[host].title; }
+  else if(W.sites[host]){ title=renderUserSite(host); }
+  else { title=notFound(host); }
+  document.title=(title||host)+' — MiniNet';
+  $('#stLeft').textContent='Loaded mini://'+cur;
+  location.hash=encodeURIComponent(cur);
+  updateChrome(); save();
+}
+function rerenderIf(){ // refresh live pages when bots reply
+  const h=parse(cur).host; if(['chirp.mini','post.mini','talk.mini','bank.mini','news.mini'].includes(h)){const st=page.scrollTop;render();page.scrollTop=st}
+  updateChrome();
+}
+function updateChrome(){
+  const u=me();
+  $('#bUser').textContent=u?('@'+u.name+' · ₥'+u.balance):'Sign in';
+  const unread=u?W.mail.filter(m=>m.to===u.name&&!m.read).length:0;
+  $('#stRight').textContent=`${Object.keys(W.sites).length+Object.keys(SITES).length} sites · ${Object.keys(W.users).length} people`+(unread?` · ✉ ${unread} unread`:'');
+  $('#marks').innerHTML=W.bookmarks.map(b=>`<a data-go="${esc(b)}">${esc(b)}</a>`).join('');
+}
+$('#addr').addEventListener('keydown',e=>{if(e.key==='Enter'){go(e.target.value);e.target.blur()}});
+$('#addr').addEventListener('focus',e=>e.target.select());
+$('#bBack').onclick=()=>{if(hpos>0){hpos--;cur=hist[hpos];render()}};
+$('#bFwd').onclick=()=>{if(hpos<hist.length-1){hpos++;cur=hist[hpos];render()}};
+$('#bReload').onclick=()=>render();
+$('#bHome').onclick=()=>go('home.mini');
+$('#bStar').onclick=()=>{const i=W.bookmarks.indexOf(cur);if(i>=0){W.bookmarks.splice(i,1);toast('Bookmark removed')}else{W.bookmarks.push(cur);toast('Bookmarked')}save();render()};
+$('#bUser').onclick=()=>W.me?go('people.mini/'+W.me):signInModal();
+$('#bMenu').onclick=menuModal;
+document.addEventListener('click',e=>{const a=e.target.closest('[data-go]');if(a){e.preventDefault();go(a.dataset.go)}});
+let renderedAt=0;
+window.addEventListener('message',e=>{
+  const f=document.querySelector('iframe.usersite');
+  if(!f||e.source!==f.contentWindow)return;                      // only the published site on screen
+  // only right after a real click inside the site itself — never automatic redirects
+  if(document.activeElement!==f)return;
+  if(navigator.userActivation&&!navigator.userActivation.isActive)return;
+  const g=e.data&&typeof e.data.mininetGo==='string'?e.data.mininetGo.replace(/^mini:\/\//,''):'';
+  if(/^[a-z0-9-]+\.mini([/?#].*)?$/i.test(g))go(g);
+});
+
+/* ================= ACCOUNTS ================= */
+function signInModal(){
+  const people=Object.values(W.users).filter(u=>!u.bot);
+  modal(`<h2>Enter MiniNet</h2><p class="muted">Pick a username. Anyone using this file can have their own account.</p>
+  <input class="f" id="mName" placeholder="username (letters/numbers)" maxlength="16">
+  <div class="row"><button class="btn" id="mGo">Join / Sign in</button><button class="btn alt" onclick="closeModal()">Cancel</button></div>
+  ${people.length?`<p class="muted" style="margin-top:14px">People on this file:</p>`+people.map(p=>`<button class="btn alt" style="margin:3px" data-pick="${esc(p.name)}">@${esc(p.name)}</button>`).join(''):''}`);
+  const doIt=n=>{n=(n||'').toLowerCase().replace(/[^a-z0-9_]/g,'');if(!n)return toast('Pick a username');
+    if(W.users[n]&&W.users[n].bot)return toast('That name belongs to a bot');
+    if(!W.users[n]){W.users[n]={name:n,bio:'New to MiniNet.',balance:1000,joined:Date.now()};
+      W.tx.unshift({id:id(),from:'MiniBank',to:n,amt:1000,note:'Welcome bonus',t:Date.now()});
+      sendMail('zara',n,'Welcome to MiniNet!',`Hey ${n}!\n\nYou just joined MiniNet. A few things to try:\n• Post on chirp.mini\n• Build your own website at build.mini\n• You have ₥1000 in bank.mini — spend it at minimart.mini\n• Write an article on wiki.mini\n\nReply to this mail, I read everything 🙂\n— zara`);
+      event(`${n} joined MiniNet`);toast('Welcome, @'+n+'! You got ₥1000.')}
+    else toast('Signed in as @'+n);
+    W.me=n;save();closeModal();render()};
+  $('#mGo').onclick=()=>doIt($('#mName').value);
+  $('#mName').onkeydown=e=>{if(e.key==='Enter')doIt(e.target.value)};
+  $('#mbox').querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>doIt(b.dataset.pick));
+  setTimeout(()=>$('#mName')&&$('#mName').focus(),50);
+}
+function menuModal(){
+  modal(`<h2>MiniNet menu</h2>
+  ${W.me?`<button class="btn alt" style="width:100%;margin:4px 0" id="mOut">Sign out @${esc(W.me)}</button>`:''}
+  <button class="btn" style="width:100%;margin:4px 0" id="mSave">💾 Save the world into a new copy of this file</button>
+  <button class="btn alt" style="width:100%;margin:4px 0" id="mExp">⬇ Export world (.json)</button>
+  <button class="btn alt" style="width:100%;margin:4px 0" id="mImp">⬆ Import world (.json)</button>
+  <button class="btn alt" style="width:100%;margin:4px 0;color:#b91c1c" id="mReset">Reset the whole internet</button>
+  <p class="muted">Your world is saved automatically in this browser. Use “Save the world into a file” to carry it to another computer — the new file opens with everything inside.</p>
+  <input type="file" id="mFile" accept=".json" style="display:none">`);
+  if(W.me) $('#mOut').onclick=()=>{W.me=null;save();closeModal();render()};
+  $('#mSave').onclick=()=>{save();const html='<!doctype html>\n'+document.documentElement.outerHTML.replace(/<script id="world-data" type="application\/json">[\s\S]*?<\/script>/,'<script id="world-data" type="application/json">'+JSON.stringify(W).replace(/</g,'\\u003c')+'<\/script>');
+    download('MiniNet.html',html,'text/html');toast('Saved! The new file carries this whole world.')};
+  $('#mExp').onclick=()=>download('mininet-world.json',JSON.stringify(W,null,1),'application/json');
+  $('#mImp').onclick=()=>$('#mFile').click();
+  $('#mFile').onchange=e=>{const f=e.target.files[0];if(!f)return;f.text().then(t=>{try{W=JSON.parse(t);save();closeModal();go('home.mini');toast('World imported')}catch(err){toast('That file is not a MiniNet world')}})};
+  $('#mReset').onclick=()=>{if(confirm('Erase everything on this MiniNet and start fresh?')){W=freshWorld();save();closeModal();go('home.mini')}};
+}
+function download(name,data,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([data],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}
+
+/* ================= BOT BRAINS ================= */
+function botReply(bot,text){
+  const t=(text||'').toLowerCase();
+  const topics=[
+    [/music|song|afro|beat|album|playlist|dance/, ['Music is the real internet 🎶','Send me your playlist!','That sounds like a vibe.','Now I need to hear it 🎧','Adding that to my list.','Afrobeats never misses.']],
+    [/money|coin|trade|market|price|bank|₥|buy|sell|invest/, ['Buy low, sell high, and never trade what you can\'t lose 📈','Check bank.mini, your balance is safe.','Smart move. Track every coin.','Budget first, then fun.','The market rewards patience.']],
+    [/site|build|html|web|code|design|css/, ['You can build one at build.mini in seconds.','HTML is just words with pointy hats.','Post the link when it is live!','Clean design wins every time.','What colours are you using?']],
+    [/hello|hi\b|hey|sup|good (morning|evening)|welcome/, ['Hey hey! 👋','Hello! Welcome in.','Hi! How is your day on MiniNet?','Good to see you here!']],
+    [/ai|agent|robot|claude|gpt|gemini|bot/, ['AI driving a browser is wild. Welcome, friend 🤖','Are you a human or an agent? Either way, hi!','The future is agents helping people.','Teach me something, AI!']],
+    [/\?$/, ['Good question. Try find.mini — it searches everything here.','Hmm, I think the wiki might know. wiki.mini','Honestly? Not sure. What do you think?','Great question — anyone else know?']]
+  ];
+  const flavour={ada:['That is beautifully logical.','Fascinating. Tell me more.','I wrote a poem about that once.','Elegant thought.'],kemi:['Haha true 😂','Vibes!','Facts only.','Say it louder!'],tunde:['Bullish on this.','The market agrees.','I would invest in that idea.','Solid.'],zara:['Love this ✨','That would make a great website.','So creative!','Beautiful idea.'],newsbot:['Noted for tomorrow\'s headlines.']};
+  let pool=null; for(const [re,ans] of topics) if(re.test(t)){pool=ans;break}
+  pool=pool||flavour[bot]||['Interesting!'];
+  W.lastReply=W.lastReply||{};
+  const options=pool.filter(x=>x!==W.lastReply[bot]); const r=pick(options.length?options:pool); W.lastReply[bot]=r;
+  return r;
+}
+const humanBots=['ada','kemi','tunde','zara'];
+
+/* ================= SITES ================= */
+const SITES={};
+function site(host,title,fn){SITES[host]={title,render:fn}}
+
+/* ---- home.mini ---- */
+site('home.mini','MiniNet Home',()=>{
+  const tiles=[
+    ['find.mini','Find','Search everything','#2563eb'],['chirp.mini','Chirp','Social network','#0ea5e9'],
+    ['post.mini','Post','Email for MiniNet','#7c3aed'],['minimart.mini','MiniMart','Online shop','#ea580c'],
+    ['bank.mini','MiniBank','Your money','#059669'],['wiki.mini','MiniWiki','Free encyclopedia','#475569'],
+    ['news.mini','MiniNews','What\'s happening','#dc2626'],['talk.mini','Talk','Live chat rooms','#db2777'],
+    ['build.mini','Build','Make your own website','#ca8a04'],['play.mini','Play','Games','#16a34a'],
+    ['people.mini','People','Everyone on MiniNet','#0891b2'],['sites.mini','Directory','All websites','#4f46e5']];
+  page.innerHTML=`<div class="wrap">
+  <h1 style="font-size:34px">Welcome to <span style="color:#059669">MiniNet</span></h1>
+  <p class="muted">A whole internet living inside one file. ${Object.keys(W.users).length} people · ${Object.keys(SITES).length+Object.keys(W.sites).length} websites · ${W.posts.length} posts.</p>
+  ${W.me?`<p>Signed in as ${user(W.me)}. <span class="lnk" data-go="post.mini">Check your mail</span>.</p>`:`<p><button class="btn" id="hJoin">Join MiniNet — get ₥1000</button></p>`}
+  <div class="grid">${tiles.map(([h,n,d,c])=>`<div class="tile" style="background:${c}" data-go="${h}"><b>${n}</b><span>${d}</span><br><span style="opacity:.7;font-size:12px">${h}</span></div>`).join('')}</div>
+  <h3 style="margin-top:26px">Live on the network</h3>
+  ${W.events.slice(0,6).map(e=>`<div class="muted">• ${esc(e.text)} <i>${ago(e.t)}</i></div>`).join('')}
+  </div>`;
+  const j=$('#hJoin'); if(j) j.onclick=signInModal;
+});
+
+/* ---- find.mini (search engine) ---- */
+function searchIndex(){
+  const docs=[];
+  for(const h in SITES) docs.push({url:h,title:SITES[h].title,text:h+' '+SITES[h].title});
+  for(const h in W.sites){const s=W.sites[h];docs.push({url:h,title:s.title||h,text:h+' '+s.title+' '+s.html.replace(/<[^>]+>/g,' ')})}
+  for(const k in W.wiki){const a=W.wiki[k];docs.push({url:'wiki.mini/'+encodeURIComponent(k),title:a.title+' — MiniWiki',text:a.title+' '+a.body})}
+  for(const p of W.posts) docs.push({url:'chirp.mini/post/'+p.id,title:'@'+p.by+' on Chirp',text:p.text});
+  for(const n in W.users) docs.push({url:'people.mini/'+n,title:'@'+n+' — profile',text:n+' '+(W.users[n].bio||'')});
+  for(const p of PRODUCTS) docs.push({url:'minimart.mini/item/'+p.id,title:p.name+' — MiniMart',text:p.name+' '+p.desc});
+  return docs;
+}
+site('find.mini','Find',(path,q)=>{
+  const query=(q.get('q')||'').trim();
+  let res=[];
+  if(query){const terms=query.toLowerCase().split(/\s+/);
+    res=searchIndex().map(d=>{const t=d.text.toLowerCase();let s=0;for(const w of terms){if(!w)continue;const c=t.split(w).length-1;s+=c+(d.title.toLowerCase().includes(w)?3:0)}return{...d,s}}).filter(d=>d.s>0).sort((a,b)=>b.s-a.s).slice(0,30)}
+  const snip=d=>{const t=d.text.replace(/\s+/g,' ');const i=t.toLowerCase().indexOf(query.toLowerCase().split(' ')[0]);return esc(t.slice(Math.max(0,i-60),i+120))};
+  page.innerHTML=`<div class="wrap" style="${query?'':'text-align:center;padding-top:80px'}">
+   <h1 style="font-size:${query?28:56}px;letter-spacing:-1px"><span style="color:#2563eb">F</span><span style="color:#dc2626">i</span><span style="color:#ca8a04">n</span><span style="color:#16a34a">d</span></h1>
+   <div class="row" style="max-width:600px;${query?'':'margin:auto'}"><input class="f" id="fq" style="flex:1;margin:0;border-radius:24px;padding:12px 18px" placeholder="Search MiniNet" value="${esc(query)}"><button class="btn" id="fgo" style="border-radius:24px">Search</button></div>
+   ${query?`<p class="muted">${res.length} results for “${esc(query)}”</p>`+(res.length?res.map(d=>`<div style="margin:18px 0"><div class="muted">mini://${esc(d.url)}</div><div class="lnk" style="font-size:18px;text-decoration:none;color:#1a0dab" data-go="${esc(d.url)}">${esc(d.title)}</div><div style="font-size:14px;color:#4d5156">${snip(d)}…</div></div>`).join(''):`<p>Nothing found. Why not <span class="lnk" data-go="wiki.mini/${encodeURIComponent(query)}">write a wiki article about “${esc(query)}”</span> or <span class="lnk" data-go="build.mini">build a site</span>?</p>`):`<p class="muted" style="margin-top:20px">Try: music, zara, laptop, welcome</p>`}
+  </div>`;
+  const doS=()=>go('find.mini/?q='+encodeURIComponent($('#fq').value));
+  $('#fgo').onclick=doS;$('#fq').onkeydown=e=>{if(e.key==='Enter')doS()};
+  return query?query+' - Find':'Find';
+});
+
+/* ---- chirp.mini (social) ---- */
+function postHTML(p,full){
+  const liked=W.me&&p.likes.includes(W.me);
+  return `<div class="card" style="border-color:#dbeafe">
+   <div class="row"><b>${user(p.by)}</b><span class="muted">${ago(p.t)}</span></div>
+   <div style="margin:8px 0;white-space:pre-wrap;font-size:15px">${esc(p.text)}</div>
+   <div class="row"><button class="btn alt" data-like="${p.id}">${liked?'💙':'🤍'} ${p.likes.length}</button>
+   <button class="btn alt" data-go="chirp.mini/post/${p.id}">💬 ${p.comments.length}</button>
+   ${p.by===W.me?`<button class="btn alt" data-del="${p.id}">🗑</button>`:''}</div>
+   ${full?p.comments.map(c=>`<div style="margin:10px 0 0 14px;border-left:3px solid #bfdbfe;padding-left:10px"><b>${user(c.by)}</b> <span class="muted">${ago(c.t)}</span><div>${esc(c.text)}</div></div>`).join('')+
+   `<div class="row" style="margin-top:10px"><input class="f" id="cTxt" style="flex:1;margin:0" placeholder="Write a reply…"><button class="btn" id="cGo">Reply</button></div>`:''}
+  </div>`;
+}
+site('chirp.mini','Chirp',(path)=>{
+  const m=path.match(/^post\/(\w+)/);
+  const one=m?W.posts.find(p=>p.id===m[1]):null;
+  page.innerHTML=`<div style="background:#0ea5e9;color:#fff;padding:14px 16px"><div class="wrap" style="padding:0"><h2 style="margin:0">🐦 Chirp</h2><span style="opacity:.85">say something to MiniNet</span></div></div>
+  <div class="wrap" style="max-width:640px">
+  ${one?`<span class="lnk" data-go="chirp.mini">← all chirps</span>`+postHTML(one,true):
+  `<div class="card"><textarea class="f" id="pTxt" maxlength="280" placeholder="${W.me?"What's happening, @"+esc(W.me)+'?':'Sign in to chirp'}"></textarea><div class="row" style="justify-content:space-between"><span class="muted" id="pCnt">280</span><button class="btn" id="pGo" style="background:#0ea5e9">Chirp</button></div></div>`+
+  W.posts.slice().sort((a,b)=>b.t-a.t).map(p=>postHTML(p,false)).join('')}
+  </div>`;
+  page.querySelectorAll('[data-like]').forEach(b=>b.onclick=()=>{if(needLogin())return;const p=W.posts.find(x=>x.id===b.dataset.like);const i=p.likes.indexOf(W.me);i>=0?p.likes.splice(i,1):p.likes.push(W.me);save();render()});
+  page.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{W.posts=W.posts.filter(x=>x.id!==b.dataset.del);save();go('chirp.mini')});
+  if(one){const send=()=>{if(needLogin())return;const v=$('#cTxt').value.trim();if(!v)return;one.comments.push({by:W.me,text:v,t:Date.now()});
+      if(humanBots.includes(one.by)&&one.by!==W.me) later(()=>one.comments.push({by:one.by,text:botReply(one.by,v),t:Date.now()}),1500+Math.random()*2000);
+      save();render()};
+    $('#cGo').onclick=send;$('#cTxt').onkeydown=e=>{if(e.key==='Enter')send()};return 'Chirp by @'+one.by}
+  $('#pTxt').oninput=e=>$('#pCnt').textContent=280-e.target.value.length;
+  $('#pGo').onclick=()=>{if(needLogin())return;const v=$('#pTxt').value.trim();if(!v)return;
+    const p={id:id(),by:W.me,text:v,t:Date.now(),likes:[],comments:[]};W.posts.push(p);event(`@${W.me} chirped: “${v.slice(0,40)}”`);
+    const b1=pick(humanBots),b2=pick(humanBots);
+    later(()=>{if(!p.likes.includes(b1))p.likes.push(b1)},1200);
+    later(()=>p.comments.push({by:b2,text:botReply(b2,v),t:Date.now()}),2500+Math.random()*2500);
+    save();render();toast('Chirped!')};
+});
+
+/* ---- post.mini (email) ---- */
+site('post.mini','Post',(path,q)=>{
+  if(!W.me){page.innerHTML=`<div class="wrap"><h1>✉ Post</h1><p>MiniNet's email. Sign in to get your own address: <b>you@post.mini</b></p><button class="btn" onclick="signInModal()">Sign in</button></div>`;return}
+  const box=path||'inbox';
+  const mine=W.mail.filter(m=>box==='sent'?m.from===W.me:m.to===W.me);
+  const open=q.get('id')?W.mail.find(m=>m.id===q.get('id')):null;
+  if(open&&open.to===W.me) open.read=true;
+  const nav=`<div style="min-width:150px"><button class="btn" style="width:100%;background:#7c3aed" data-go="post.mini/compose">✏ Compose</button>
+   <p><span class="lnk" data-go="post.mini/inbox">Inbox (${W.mail.filter(m=>m.to===W.me&&!m.read).length})</span></p><p><span class="lnk" data-go="post.mini/sent">Sent</span></p>
+   <p class="muted">Your address:<br><b>${esc(W.me)}@post.mini</b></p></div>`;
+  let main;
+  if(box==='compose'){
+    main=`<h2>New message</h2><label class="muted">To (username)</label><input class="f" id="mTo" list="ppl" value="${esc(q.get('to')||'')}"><datalist id="ppl">${Object.keys(W.users).map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
+    <label class="muted">Subject</label><input class="f" id="mSub" value="${esc(q.get('sub')||'')}"><label class="muted">Message</label><textarea class="f" id="mBody" style="min-height:160px"></textarea><button class="btn" id="mSend" style="background:#7c3aed">Send</button>`;
+  } else if(open){
+    main=`<span class="lnk" data-go="post.mini/${box}">← back</span><h2>${esc(open.subject)}</h2><p class="muted">From ${user(open.from)} to ${user(open.to)} · ${ago(open.t)}</p><div class="card" style="white-space:pre-wrap">${esc(open.body)}</div>
+    <button class="btn" data-go="post.mini/compose?to=${encodeURIComponent(open.from===W.me?open.to:open.from)}&sub=${encodeURIComponent('Re: '+open.subject.replace(/^Re: /,''))}">Reply</button>`;
+  } else {
+    main=`<h2>${box==='sent'?'Sent':'Inbox'}</h2>`+(mine.length?mine.map(m=>`<div class="card" style="cursor:pointer;${!m.read&&box!=='sent'?'border-left:4px solid #7c3aed;font-weight:600':''}" data-go="post.mini/${box}?id=${m.id}"><div class="row" style="justify-content:space-between"><span>${box==='sent'?'To @'+esc(m.to):'@'+esc(m.from)}</span><span class="muted">${ago(m.t)}</span></div><div>${esc(m.subject)}</div><div class="muted" style="font-weight:400">${esc(m.body.slice(0,80))}</div></div>`).join(''):'<p class="muted">Nothing here yet.</p>');
+  }
+  page.innerHTML=`<div style="background:#7c3aed;color:#fff;padding:14px 16px"><h2 style="margin:0">✉ Post</h2></div><div class="wrap"><div class="row" style="align-items:flex-start;flex-wrap:nowrap;gap:24px">${nav}<div style="flex:1;min-width:0">${main}</div></div></div>`;
+  if(box==='compose') $('#mSend').onclick=()=>{
+    const to=$('#mTo').value.trim().toLowerCase(),sub=$('#mSub').value.trim()||'(no subject)',body=$('#mBody').value;
+    if(!W.users[to])return toast('No one called @'+to+' on MiniNet');
+    sendMail(W.me,to,sub,body);
+    if(W.users[to].bot&&humanBots.includes(to)) later(()=>sendMail(to,W.me,'Re: '+sub.replace(/^Re: /,''),`Hi ${W.me},\n\n${botReply(to,body+' '+sub)}\n\n— ${to}`),2500+Math.random()*3000);
+    save();toast('Sent to @'+to);go('post.mini/sent')};
+  updateChrome(); return 'Post';
+});
+
+/* ---- minimart.mini (shop) ---- */
+const PRODUCTS=[
+  {id:'p1',name:'Pixel Hoodie',price:120,emoji:'🧥',desc:'Cozy hoodie with a tiny pixel heart.'},
+  {id:'p2',name:'Noise-free Headphones',price:340,emoji:'🎧',desc:'Hear only the music, never the noise.'},
+  {id:'p3',name:'Mini Laptop',price:900,emoji:'💻',desc:'Runs MiniNet at full speed. Obviously.'},
+  {id:'p4',name:'Jollof Rice Kit',price:45,emoji:'🍛',desc:'Everything you need for party jollof.'},
+  {id:'p5',name:'Golden Domain',price:250,emoji:'🏷️',desc:'A shiny badge on your profile. Pure flex.'},
+  {id:'p6',name:'Plant Friend',price:30,emoji:'🪴',desc:'Never dies. Never needs water. Lives in a file.'},
+  {id:'p7',name:'Sneakers',price:180,emoji:'👟',desc:'Run between websites faster.'},
+  {id:'p8',name:'Coffee',price:8,emoji:'☕',desc:'Fuel for builders.'}
+];
+site('minimart.mini','MiniMart',(path)=>{
+  const item=path.startsWith('item/')?PRODUCTS.find(p=>p.id===path.slice(5)):null;
+  const cartTotal=W.cart.reduce((s,c)=>s+PRODUCTS.find(p=>p.id===c).price,0);
+  const head=`<div style="background:#ea580c;color:#fff;padding:14px 16px"><div class="row" style="justify-content:space-between;max-width:900px;margin:auto"><h2 style="margin:0;cursor:pointer" data-go="minimart.mini">🛒 MiniMart</h2><button class="btn" style="background:#fff;color:#ea580c" data-go="minimart.mini/cart">Cart (${W.cart.length}) · ₥${cartTotal}</button></div></div>`;
+  let body;
+  if(path==='cart'){
+    body=`<h2>Your cart</h2>`+(W.cart.length?W.cart.map((c,i)=>{const p=PRODUCTS.find(x=>x.id===c);return `<div class="card row" style="justify-content:space-between"><span>${p.emoji} ${esc(p.name)}</span><span>₥${p.price} <button class="btn alt" data-rm="${i}">✕</button></span></div>`}).join('')+
+     `<h3>Total: ₥${cartTotal}</h3>${W.me?`<p class="muted">Your MiniBank balance: ₥${me().balance}</p>`:''}<button class="btn" id="checkout" style="background:#ea580c">Pay with MiniBank</button>`:'<p class="muted">Your cart is empty.</p>');
+  } else if(item){
+    body=`<span class="lnk" data-go="minimart.mini">← shop</span><div class="row" style="gap:30px;margin-top:16px"><div style="font-size:120px">${item.emoji}</div><div><h1>${esc(item.name)}</h1><p>${esc(item.desc)}</p><h2 style="color:#ea580c">₥${item.price}</h2><button class="btn" data-add="${item.id}" style="background:#ea580c">Add to cart</button></div></div>`;
+  } else {
+    const owned=W.me?(me().owned||[]):[];
+    body=`<p class="muted">Pay with MiniCoins (₥) from your MiniBank account.</p><div class="grid">${PRODUCTS.map(p=>`<div class="card" style="text-align:center"><div style="font-size:54px;cursor:pointer" data-go="minimart.mini/item/${p.id}">${p.emoji}</div><b>${esc(p.name)}</b><div style="color:#ea580c;font-weight:700">₥${p.price}</div>${owned.includes(p.id)?'<div class="pill">owned</div>':''}<button class="btn" style="margin-top:8px;background:#ea580c" data-add="${p.id}">Add to cart</button></div>`).join('')}</div>`;
+  }
+  page.innerHTML=head+`<div class="wrap">${body}</div>`;
+  page.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>{W.cart.push(b.dataset.add);save();toast('Added to cart');render()});
+  page.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{W.cart.splice(+b.dataset.rm,1);save();render()});
+  const co=$('#checkout'); if(co) co.onclick=()=>{if(needLogin())return;const u=me();
+    if(u.balance<cartTotal)return toast('Not enough MiniCoins. Earn some at play.mini!');
+    u.balance-=cartTotal;W.users.shop.balance+=cartTotal;u.owned=[...new Set([...(u.owned||[]),...W.cart])];
+    const names=W.cart.map(c=>PRODUCTS.find(p=>p.id===c).name);
+    W.tx.unshift({id:id(),from:u.name,to:'shop',amt:cartTotal,note:'MiniMart: '+names.join(', '),t:Date.now()});
+    sendMail('shop',u.name,'Your MiniMart order',`Thanks for shopping!\n\nItems:\n${names.map(n=>'• '+n).join('\n')}\n\nTotal paid: ₥${cartTotal}\n\n— MiniMart`);
+    event(`@${u.name} bought ${names.length} item(s) at MiniMart`);
+    W.cart=[];save();toast('Order placed! Receipt sent to your mail.');go('minimart.mini')};
+  return item?item.name+' - MiniMart':'MiniMart';
+});
+
+/* ---- bank.mini ---- */
+site('bank.mini','MiniBank',()=>{
+  if(!W.me){page.innerHTML=`<div class="wrap"><h1>🏦 MiniBank</h1><p>Open an account by joining MiniNet. Every new person gets ₥1000.</p><button class="btn" onclick="signInModal()">Open account</button></div>`;return}
+  const u=me(),txs=W.tx.filter(t=>t.from===u.name||t.to===u.name);
+  page.innerHTML=`<div style="background:#064e3b;color:#fff;padding:26px 16px"><div class="wrap" style="padding:0"><div style="opacity:.8">🏦 MiniBank · account @${esc(u.name)}</div><div style="font-size:44px;font-weight:800">₥${u.balance.toLocaleString()}</div></div></div>
+  <div class="wrap"><div class="card"><h3>Send money</h3><div class="row"><input class="f" id="tTo" list="ppl2" placeholder="to username" style="flex:1"><datalist id="ppl2">${Object.keys(W.users).filter(n=>n!==u.name).map(n=>`<option value="${esc(n)}">`).join('')}</datalist><input class="f" id="tAmt" type="number" min="1" placeholder="amount" style="width:120px"></div><input class="f" id="tNote" placeholder="note (optional)"><button class="btn" id="tGo" style="background:#059669">Send</button></div>
+  <h3>Transactions</h3>${txs.length?txs.map(t=>{const inc=t.to===u.name;return `<div class="card row" style="justify-content:space-between"><div><b>${inc?'From '+esc(t.from):'To '+esc(t.to)}</b><div class="muted">${esc(t.note||'')} · ${ago(t.t)}</div></div><b style="color:${inc?'#059669':'#b91c1c'}">${inc?'+':'−'}₥${t.amt}</b></div>`}).join(''):'<p class="muted">No transactions yet.</p>'}</div>`;
+  $('#tGo').onclick=()=>{const to=$('#tTo').value.trim().toLowerCase(),amt=Math.floor(+$('#tAmt').value),note=$('#tNote').value;
+    if(!W.users[to]||to===u.name)return toast('Pick another person');if(!(amt>0))return toast('Enter an amount');if(amt>u.balance)return toast('Not enough MiniCoins');
+    u.balance-=amt;W.users[to].balance+=amt;W.tx.unshift({id:id(),from:u.name,to,amt,note,t:Date.now()});
+    sendMail('minibank',to,`You received ₥${amt}`,`@${u.name} sent you ₥${amt}.${note?'\nNote: '+note:''}`);
+    if(humanBots.includes(to)) later(()=>sendMail(to,u.name,'Thanks!',`Got your ₥${amt}. ${botReply(to,'money')} 🙏`),2500);
+    event(`@${u.name} sent money to @${to}`);save();toast('Sent ₥'+amt+' to @'+to);render()};
+});
+
+/* ---- wiki.mini ---- */
+const WIKI_SEED={
+  'MiniNet':{title:'MiniNet',body:'MiniNet is a small internet that lives entirely inside a single HTML file.\n\nIt has its own search engine ([[find.mini]]), social network, email, shop, bank, chat rooms and a website builder. Every website ends in .mini.\n\nSee also: [[MiniCoin]], [[Websites]].',by:'zara'},
+  'MiniCoin':{title:'MiniCoin',body:'MiniCoin (₥) is the currency of MiniNet. New people receive ₥1000 from MiniBank. You can earn more by playing games at play.mini, and spend it at MiniMart.',by:'tunde'},
+  'Websites':{title:'Websites',body:'A website is a page with an address. On MiniNet, anyone can publish one at build.mini. Your site gets an address like yourname.mini and appears in search immediately.',by:'ada'}
+};
+site('wiki.mini','MiniWiki',(path)=>{
+  for(const k in WIKI_SEED) if(!W.wiki[k]) W.wiki[k]={...WIKI_SEED[k],t:W.created};
+  const name=decodeURIComponent(path).replace(/\/edit$/,''),edit=path.endsWith('/edit');
+  const a=name?W.wiki[name]:null;
+  const linkify=s=>esc(s).replace(/\[\[([^\]]+)\]\]/g,(m,t)=>`<span class="lnk" data-go="${/\.mini$/.test(t)?t:'wiki.mini/'+encodeURIComponent(t)}">${t}</span>`);
+  let body;
+  if(!name){body=`<h1 style="font-family:Georgia,serif">MiniWiki</h1><p>The free encyclopedia anyone on MiniNet can edit. ${Object.keys(W.wiki).length} articles.</p>
+    <div class="row"><input class="f" id="wNew" placeholder="New article title" style="flex:1"><button class="btn" id="wCreate">Create</button></div>
+    <h3>All articles</h3>${Object.keys(W.wiki).sort().map(k=>`<div><span class="lnk" data-go="wiki.mini/${encodeURIComponent(k)}">${esc(k)}</span> <span class="muted">by @${esc(W.wiki[k].by)}</span></div>`).join('')}`}
+  else if(edit||!a){body=`<h1 style="font-family:Georgia,serif">${a?'Editing':'Create'}: ${esc(name)}</h1>${!a?'<p class="muted">This article does not exist yet. Write it!</p>':''}<p class="muted">Tip: link to other articles with [[Title]].</p><textarea class="f" id="wBody" style="min-height:260px;font-family:Georgia,serif;font-size:15px">${esc(a?a.body:'')}</textarea><button class="btn" id="wSave">Publish article</button> <span class="lnk" data-go="wiki.mini">cancel</span>`}
+  else{body=`<span class="lnk" data-go="wiki.mini">← MiniWiki</span><h1 style="font-family:Georgia,serif;border-bottom:1px solid #ddd;padding-bottom:6px">${esc(a.title)}</h1><div style="font-family:Georgia,serif;font-size:16px;line-height:1.6;white-space:pre-wrap">${linkify(a.body)}</div><p class="muted" style="margin-top:20px">Last edited by @${esc(a.by)} · ${ago(a.t)} · <span class="lnk" data-go="wiki.mini/${encodeURIComponent(name)}/edit">Edit this article</span></p>`}
+  page.innerHTML=`<div class="wrap" style="max-width:760px">${body}</div>`;
+  const c=$('#wCreate');if(c){const f=()=>{const v=$('#wNew').value.trim();if(v)go('wiki.mini/'+encodeURIComponent(v))};c.onclick=f;$('#wNew').onkeydown=e=>{if(e.key==='Enter')f()}}
+  const s=$('#wSave');if(s)s.onclick=()=>{if(needLogin())return;const b=$('#wBody').value.trim();if(!b)return toast('Write something first');
+    W.wiki[name]={title:name,body:b,by:W.me,t:Date.now()};event(`@${W.me} ${a?'edited':'wrote'} the wiki article “${name}”`);save();go('wiki.mini/'+encodeURIComponent(name))};
+  return name?name+' - MiniWiki':'MiniWiki';
+});
+
+/* ---- news.mini ---- */
+site('news.mini','MiniNews',()=>{
+  const stories=[
+    ['Network grows','MiniNet now has '+Object.keys(W.users).length+' people and '+(Object.keys(W.sites).length+Object.keys(SITES).length)+' websites.'],
+    ['Economy','A total of ₥'+Object.values(W.users).reduce((s,u)=>s+u.balance,0).toLocaleString()+' is circulating across MiniBank accounts.'],
+    ['Culture','The most liked chirp right now: “'+((W.posts.slice().sort((a,b)=>b.likes.length-a.likes.length)[0]||{text:'—'}).text.slice(0,90))+'”'],
+    ['Knowledge','MiniWiki has '+Math.max(Object.keys(W.wiki).length,3)+' articles. Writers wanted.']];
+  page.innerHTML=`<div style="border-bottom:4px double #111;text-align:center;padding:18px 16px 8px;font-family:Georgia,serif"><div class="muted">${new Date().toDateString()}</div><h1 style="font-size:44px;margin:0">The MiniNews</h1><div class="muted">All the news that fits in a file</div></div>
+  <div class="wrap" style="font-family:Georgia,serif">
+   <div class="grid">${stories.map(([h,b])=>`<div><div style="color:#dc2626;font-size:12px;text-transform:uppercase;letter-spacing:1px">${h}</div><div style="font-size:18px">${esc(b)}</div></div>`).join('')}</div>
+   <h2 style="margin-top:28px;border-top:1px solid #ccc;padding-top:12px">Live wire</h2>
+   ${W.events.slice(0,40).map(e=>`<div style="padding:6px 0;border-bottom:1px solid #eee"><span class="muted">${ago(e.t)}</span> — ${esc(e.text)}</div>`).join('')}
+  </div>`;
+});
+
+/* ---- talk.mini (chat rooms) ---- */
+site('talk.mini','Talk',(path)=>{
+  const room=W.chat[path]?path:'general';
+  page.innerHTML=`<div style="display:flex;height:100%;min-height:400px">
+   <div style="width:150px;background:#831843;color:#fff;padding:12px;flex-shrink:0"><b>💬 Talk</b><div style="margin-top:12px">${Object.keys(W.chat).map(r=>`<div data-go="talk.mini/${r}" style="cursor:pointer;padding:6px;border-radius:6px;${r===room?'background:#db2777':''}"># ${r}</div>`).join('')}</div>
+   <div style="margin-top:10px"><input class="f" id="newRoom" placeholder="new room" style="padding:5px;font-size:12px"></div></div>
+   <div style="flex:1;display:flex;flex-direction:column;min-width:0"><div id="msgs" style="flex:1;overflow:auto;padding:14px">${W.chat[room].map(m=>`<div style="margin:6px 0"><b style="color:#db2777">${esc(m.by)}</b> <span class="muted">${ago(m.t)}</span><div>${esc(m.text)}</div></div>`).join('')}</div>
+   <div class="row" style="padding:10px;border-top:1px solid #eee;flex-wrap:nowrap"><input class="f" id="cMsg" style="margin:0;flex:1" placeholder="Message #${room}"><button class="btn" id="cSend" style="background:#db2777">Send</button></div></div></div>`;
+  const ms=$('#msgs');ms.scrollTop=ms.scrollHeight;
+  const send=()=>{if(needLogin())return;const v=$('#cMsg').value.trim();if(!v)return;W.chat[room].push({by:W.me,text:v,t:Date.now()});
+    if(Math.random()<.85){const b=pick(humanBots);later(()=>W.chat[room].push({by:b,text:botReply(b,v),t:Date.now()}),1000+Math.random()*2500)}
+    save();render();setTimeout(()=>$('#cMsg')&&$('#cMsg').focus(),0)};
+  $('#cSend').onclick=send;$('#cMsg').onkeydown=e=>{if(e.key==='Enter')send()};
+  $('#newRoom').onkeydown=e=>{if(e.key==='Enter'){const r=e.target.value.toLowerCase().replace(/[^a-z0-9-]/g,'');if(r){W.chat[r]=W.chat[r]||[];event(`#${r} chat room opened`);save();go('talk.mini/'+r)}}};
+  return '#'+room+' - Talk';
+});
+
+/* ---- build.mini (website builder) ---- */
+const STARTER=`<style>
+  body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;padding:40px;max-width:700px;margin:auto}
+  h1{color:#fbbf24} a{color:#38bdf8}
+</style>
+<h1>Hello, I'm new here!</h1>
+<p>This is my website on MiniNet. I made it in one minute.</p>
+<p>Links to other MiniNet sites work: <a href="chirp.mini">Chirp</a> · <a href="zara.mini">Zara's site</a></p>
+<button onclick="this.textContent='You clicked me! 🎉'">Click me</button>`;
+site('build.mini','Build',(path)=>{
+  const editing=path?decodeURIComponent(path):'';
+  const ex=editing?W.sites[editing]:null;
+  if(ex&&ex.owner!==W.me){go(editing);return}
+  const mySites=W.me?Object.entries(W.sites).filter(([h,s])=>s.owner===W.me):[];
+  page.innerHTML=`<div style="background:#ca8a04;color:#fff;padding:14px 16px"><h2 style="margin:0">🛠 Build — make a website on MiniNet</h2></div>
+  <div class="wrap" style="max-width:1100px">
+   ${mySites.length?`<p><b>Your sites:</b> ${mySites.map(([h])=>`<span class="pill"><span class="lnk" data-go="${esc(h)}">${esc(h)}</span> · <span class="lnk" data-go="build.mini/${encodeURIComponent(h)}">edit</span></span>`).join('')}</p>`:''}
+   <div class="row"><div style="flex:1;min-width:200px"><label class="muted">Address</label><div class="row" style="flex-wrap:nowrap"><input class="f" id="bName" placeholder="mysite" value="${esc(editing.replace(/\.mini$/,''))}" ${ex?'disabled':''} style="flex:1"><b>.mini</b></div></div>
+   <div style="flex:1;min-width:200px"><label class="muted">Title</label><input class="f" id="bTitle" value="${esc(ex?ex.title:'')}" placeholder="My cool site"></div></div>
+   <div class="row" style="align-items:stretch;flex-wrap:wrap">
+    <div style="flex:1;min-width:280px"><label class="muted">HTML (you can use CSS and JavaScript too)</label><textarea class="f" id="bHtml" spellcheck="false" style="min-height:340px;font-family:Consolas,monospace;font-size:13px;background:#0f172a;color:#e2e8f0">${esc(ex?ex.html:STARTER)}</textarea></div>
+    <div style="flex:1;min-width:280px"><label class="muted">Live preview</label><iframe id="bPrev" sandbox="allow-scripts" style="width:100%;height:340px;border:1px solid #cfd3dd;border-radius:8px;margin-top:4px;background:#fff"></iframe></div>
+   </div>
+   <div class="row"><button class="btn" id="bPub" style="background:#ca8a04">${ex?'Update site':'🚀 Publish to MiniNet'}</button>${ex?`<button class="btn alt" id="bDel" style="color:#b91c1c">Delete site</button>`:''}</div>
+  </div>`;
+  const dkey=editing||'new'; W.drafts=W.drafts||{}; const dr=W.drafts[dkey];
+  if(dr&&!ex){$('#bName').value=dr.name||'';$('#bTitle').value=dr.title||'';$('#bHtml').value=dr.html||'';}
+  else if(dr&&ex&&dr.html&&dr.html!==ex.html){$('#bHtml').value=dr.html;$('#bTitle').value=dr.title||ex.title;}
+  const keep=()=>{const h=$('#bHtml');if(!h)return;W.drafts[dkey]={name:$('#bName').value,title:$('#bTitle').value,html:h.value,t:Date.now()};save()};
+  const prev=()=>{const h=$('#bHtml'),f=$('#bPrev');if(h&&f)f.srcdoc=h.value};prev();
+  let tm;$('#bHtml').oninput=()=>{clearTimeout(tm);tm=setTimeout(()=>{prev();keep()},300)};
+  $('#bTitle').oninput=keep;$('#bName').oninput=keep;
+  $('#bHtml').onkeydown=e=>{if(e.key==='Tab'){e.preventDefault();const t=e.target,s=t.selectionStart;t.value=t.value.slice(0,s)+'  '+t.value.slice(t.selectionEnd);t.selectionStart=t.selectionEnd=s+2}};
+  $('#bPub').onclick=()=>{if(needLogin())return;
+    const host=(ex?editing:($('#bName').value.toLowerCase().replace(/[^a-z0-9-]/g,'')+'.mini'));
+    if(host==='.mini')return toast('Pick an address');
+    if(!ex&&(SITES[host]||W.sites[host]))return toast(host+' is already taken');
+    W.sites[host]={owner:W.me,title:$('#bTitle').value.trim()||host,html:$('#bHtml').value,t:Date.now(),views:ex?ex.views:0};
+    event(`${host} was ${ex?'updated':'published'} by @${W.me}`);
+    if(W.drafts){delete W.drafts[editing||'new'];}
+    if(!ex){const b=pick(humanBots);later(()=>sendMail(b,W.me,'Saw your new site!',`Just visited ${host} — ${pick(['love the colours!','great start, keep adding pages.','the layout is really clean.','bookmarked it already.','this made my day.'])} ${pick(['What will you add next?','Can I link to it from my page?','Tell me when you update it.',''])}\n\n— ${b}`),4000)}
+    save();toast(ex?'Updated!':'Published! Your site is live at '+host);go(host)};
+  const d=$('#bDel');if(d)d.onclick=()=>{if(confirm('Delete '+editing+'?')){delete W.sites[editing];event(`${editing} went offline`);save();go('build.mini')}};
+  return 'Build';
+});
+function renderUserSite(host){
+  renderedAt=Date.now();
+  const s=W.sites[host];s.views=(s.views||0)+1;
+  const bridge=`<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href')||'';if(/^(mini:\\/\\/)?[a-z0-9-]+\\.mini/i.test(h)){e.preventDefault();parent.postMessage({mininetGo:h.replace(/^mini:\\/\\//,'')},'*')}});<\/script>`;
+  page.innerHTML=`<iframe class="usersite" sandbox="allow-scripts allow-forms allow-modals"></iframe>`;
+  page.firstChild.srcdoc=s.html+bridge;
+  $('#stLeft').textContent=`mini://${host} · by @${s.owner} · ${s.views} views`;
+  return s.title;
+}
+
+/* ---- play.mini (games — earn MiniCoins) ---- */
+site('play.mini','Play',(path)=>{
+  if(path==='snake') return snake();
+  if(path==='guess') return guess();
+  page.innerHTML=`<div style="background:#16a34a;color:#fff;padding:14px 16px"><h2 style="margin:0">🎮 Play — earn MiniCoins</h2></div><div class="wrap"><div class="grid">
+   <div class="tile" style="background:#15803d" data-go="play.mini/snake"><b>🐍 Snake</b><span>Earn ₥2 per apple</span></div>
+   <div class="tile" style="background:#0f766e" data-go="play.mini/guess"><b>🔢 Guess the number</b><span>Win ₥50 if you guess in 7 tries</span></div></div>
+   <h3>Leaderboard</h3>${Object.values(W.users).filter(u=>u.best).sort((a,b)=>b.best-a.best).slice(0,10).map((u,i)=>`<div>${i+1}. ${user(u.name)} — ${u.best} apples</div>`).join('')||'<p class="muted">No scores yet. Be first!</p>'}</div>`;
+});
+const DAILY_GAME_CAP=200;
+function pay(n,why){const u=me();if(!u)return 0;
+  const day=new Date().toDateString(); W.earn=W.earn&&W.earn.day===day?W.earn:{day,by:{}};
+  const got=W.earn.by[u.name]||0; n=Math.max(0,Math.min(n,DAILY_GAME_CAP-got));
+  if(!n){toast('Daily game reward limit reached (₥'+DAILY_GAME_CAP+'). Come back tomorrow!');return 0}
+  W.earn.by[u.name]=got+n;u.balance+=n;W.tx.unshift({id:id(),from:'play.mini',to:u.name,amt:n,note:why,t:Date.now()});save();updateChrome();return n}
+function guess(){
+  const target=1+Math.floor(Math.random()*100);let tries=0,done=false;
+  page.innerHTML=`<div class="wrap" style="max-width:480px;text-align:center"><span class="lnk" data-go="play.mini">← games</span><h1>🔢 Guess 1–100</h1><p id="gMsg">I'm thinking of a number…</p><div class="row" style="justify-content:center"><input class="f" id="gIn" type="number" style="width:120px"><button class="btn" id="gGo">Guess</button></div><p class="muted" id="gT">Tries: 0 / 7</p>${W.me?'':'<p class="muted">Sign in to win MiniCoins.</p>'}</div>`;
+  const g=()=>{if(done)return;const v=+$('#gIn').value;if(!v)return;tries++;$('#gT').textContent=`Tries: ${tries} / 7`;
+    if(v===target){done=true;$('#gMsg').innerHTML=`🎉 Yes! It was ${target}.`+(W.me&&tries<=7?' You win MiniCoins (daily limit ₥'+DAILY_GAME_CAP+').':'');if(W.me&&tries<=7){const won=pay(50,'Guess game win');if(won)event(`@${W.me} won ₥${won} at Guess the number`)}}
+    else $('#gMsg').textContent=v<target?'Higher ⬆':'Lower ⬇';
+    if(!done&&tries>=7){$('#gMsg').textContent+=` — out of tries for a prize (it's still going).`}
+    $('#gIn').value='';$('#gIn').focus()};
+  $('#gGo').onclick=g;$('#gIn').onkeydown=e=>{if(e.key==='Enter')g()};
+  return 'Guess - Play';
+}
+function snake(){
+  page.innerHTML=`<div class="wrap" style="text-align:center"><span class="lnk" data-go="play.mini">← games</span><h2>🐍 Snake <span id="sc" class="pill">0</span></h2><canvas id="cv" width="320" height="320" style="background:#052e16;border-radius:10px;max-width:100%;touch-action:none"></canvas>
+  <p class="muted">Arrow keys / WASD, or swipe. ${W.me?'Each apple = ₥2.':'Sign in to earn MiniCoins.'}</p><div class="row" style="justify-content:center">${['↑','←','↓','→'].map(a=>`<button class="btn alt" data-dir="${a}" style="font-size:20px;width:56px">${a}</button>`).join('')}</div><button class="btn" id="sStart" style="margin-top:10px;background:#16a34a">Start</button></div>`;
+  const cv=$('#cv'),x=cv.getContext('2d'),N=16,S=20;let sn,d,nd,ap,score,loop;
+  const reset=()=>{sn=[{x:8,y:8},{x:7,y:8},{x:6,y:8}];d=nd={x:1,y:0};score=0;place();$('#sc').textContent=0};
+  const place=()=>{do{ap={x:Math.floor(Math.random()*N),y:Math.floor(Math.random()*N)}}while(sn.some(s=>s.x===ap.x&&s.y===ap.y))};
+  const draw=()=>{x.fillStyle='#052e16';x.fillRect(0,0,320,320);x.fillStyle='#ef4444';x.fillRect(ap.x*S+3,ap.y*S+3,S-6,S-6);sn.forEach((s,i)=>{x.fillStyle=i?'#4ade80':'#bbf7d0';x.fillRect(s.x*S+1,s.y*S+1,S-2,S-2)})};
+  const step=()=>{if(!document.body.contains(cv)){clearInterval(loop);return}
+    d=nd;const h={x:sn[0].x+d.x,y:sn[0].y+d.y};
+    if(h.x<0||h.y<0||h.x>=N||h.y>=N||sn.some(s=>s.x===h.x&&s.y===h.y)){clearInterval(loop);loop=null;x.fillStyle='rgba(0,0,0,.6)';x.fillRect(0,0,320,320);x.fillStyle='#fff';x.font='22px sans-serif';x.textAlign='center';x.fillText('Game over · '+score,160,160);
+      if(W.me&&score){const u=me();if(score>(u.best||0)){u.best=score;event(`@${u.name} set a Snake record: ${score}`)}pay(score*2,'Snake: '+score+' apples')}return}
+    sn.unshift(h);if(h.x===ap.x&&h.y===ap.y){score++;$('#sc').textContent=score;place()}else sn.pop();draw()};
+  const dirs={'↑':{x:0,y:-1},'↓':{x:0,y:1},'←':{x:-1,y:0},'→':{x:1,y:0},ArrowUp:{x:0,y:-1},ArrowDown:{x:0,y:1},ArrowLeft:{x:-1,y:0},ArrowRight:{x:1,y:0},w:{x:0,y:-1},s:{x:0,y:1},a:{x:-1,y:0},d:{x:1,y:0}};
+  const turn=k=>{const n=dirs[k];if(n&&!(n.x===-d.x&&n.y===-d.y))nd=n};
+  const kh=e=>{if(!document.body.contains(cv)){document.removeEventListener('keydown',kh);return}if(dirs[e.key]&&document.activeElement.id!=='addr'){e.preventDefault();turn(e.key)}};
+  document.addEventListener('keydown',kh);
+  page.querySelectorAll('[data-dir]').forEach(b=>b.onclick=()=>turn(b.dataset.dir));
+  let sx,sy;cv.addEventListener('touchstart',e=>{sx=e.touches[0].clientX;sy=e.touches[0].clientY});
+  cv.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-sx,dy=e.changedTouches[0].clientY-sy;turn(Math.abs(dx)>Math.abs(dy)?(dx>0?'→':'←'):(dy>0?'↓':'↑'))});
+  $('#sStart').onclick=()=>{reset();draw();clearInterval(loop);loop=setInterval(step,120)};
+  reset();draw();return 'Snake - Play';
+}
+
+/* ---- people.mini ---- */
+site('people.mini','People',(path)=>{
+  const n=decodeURIComponent(path),u=W.users[n];
+  if(u){
+    const posts=W.posts.filter(p=>p.by===n).sort((a,b)=>b.t-a.t),sites=Object.entries(W.sites).filter(([h,s])=>s.owner===n);
+    page.innerHTML=`<div class="wrap" style="max-width:640px"><span class="lnk" data-go="people.mini">← everyone</span>
+     <div class="row" style="margin-top:12px"><div style="width:72px;height:72px;border-radius:50%;background:hsl(${[...n].reduce((a,c)=>a+c.charCodeAt(0),0)*37%360},70%,55%);color:#fff;font-size:32px;display:flex;align-items:center;justify-content:center">${esc(n[0].toUpperCase())}</div>
+     <div><h1 style="margin:0">@${esc(n)} ${u.bot?'<span class="pill">bot</span>':''}${(u.owned||[]).includes('p5')?' <span class="pill" style="background:#fde68a">🏷️ golden</span>':''}</h1><div class="muted">joined ${ago(u.joined)} · ${n}@post.mini</div></div></div>
+     ${n===W.me?`<textarea class="f" id="bio" style="min-height:60px;margin-top:12px">${esc(u.bio)}</textarea><button class="btn alt" id="bioS">Save bio</button>`:`<p>${esc(u.bio)}</p><div class="row"><button class="btn" data-go="post.mini/compose?to=${encodeURIComponent(n)}">✉ Message</button></div>`}
+     ${(u.owned||[]).length?`<p>Owns: ${(u.owned).map(i=>{const p=PRODUCTS.find(x=>x.id===i);return p?p.emoji:''}).join(' ')}</p>`:''}
+     ${sites.length?`<h3>Websites</h3>${sites.map(([h,s])=>`<div><span class="lnk" data-go="${esc(h)}">${esc(h)}</span> — ${esc(s.title)}</div>`).join('')}`:''}
+     <h3>Chirps</h3>${posts.map(p=>postHTML(p,false)).join('')||'<p class="muted">No chirps yet.</p>'}</div>`;
+    const bs=$('#bioS');if(bs)bs.onclick=()=>{u.bio=$('#bio').value;save();toast('Saved')};
+    page.querySelectorAll('[data-like]').forEach(b=>b.onclick=()=>{if(needLogin())return;const p=W.posts.find(x=>x.id===b.dataset.like);const i=p.likes.indexOf(W.me);i>=0?p.likes.splice(i,1):p.likes.push(W.me);save();render()});
+    return '@'+n;
+  }
+  page.innerHTML=`<div class="wrap"><h1>👥 People on MiniNet</h1><div class="grid">${Object.values(W.users).filter(u=>u.name!=='shop').map(u=>`<div class="card" style="cursor:pointer" data-go="people.mini/${esc(u.name)}"><b>@${esc(u.name)}</b> ${u.bot?'<span class="pill">bot</span>':''}<div class="muted">${esc(u.bio)}</div></div>`).join('')}</div></div>`;
+});
+
+/* ---- sites.mini (directory) ---- */
+site('sites.mini','Directory',()=>{
+  page.innerHTML=`<div class="wrap"><h1>📚 Every website on MiniNet</h1><h3>Built-in</h3>${Object.entries(SITES).map(([h,s])=>`<div style="margin:6px 0"><span class="lnk" data-go="${h}">${h}</span> — ${esc(s.title)}</div>`).join('')}
+  <h3>Made by people</h3>${Object.entries(W.sites).sort((a,b)=>b[1].t-a[1].t).map(([h,s])=>`<div style="margin:6px 0"><span class="lnk" data-go="${esc(h)}">${esc(h)}</span> — ${esc(s.title)} <span class="muted">by @${esc(s.owner)} · ${s.views||0} views</span></div>`).join('')||'<p class="muted">None yet.</p>'}
+  <p><button class="btn" data-go="build.mini">+ Build your own</button></p></div>`;
+});
+
+function notFound(host){
+  page.innerHTML=`<div class="wrap" style="text-align:center;padding-top:70px"><div style="font-size:70px">🛰️</div><h1>${esc(host)} doesn't exist… yet</h1><p class="muted">No one has built this website on MiniNet.</p>
+  ${/^[a-z0-9-]+\.mini$/.test(host)?`<button class="btn" data-go="build.mini" id="claim">Claim ${esc(host)} and build it</button> `:''}<button class="btn alt" data-go="find.mini/?q=${encodeURIComponent(host.replace('.mini',''))}">Search instead</button></div>`;
+  const c=$('#claim');if(c)c.onclick=e=>{e.stopPropagation();go('build.mini');setTimeout(()=>{$('#bName').value=host.replace('.mini','');},0)};
+  return 'Not found';
+}
+
+/* ================= BACKGROUND LIFE ================= */
+// Bots occasionally post on their own so the network feels alive.
+const BOT_POSTS={
+ ada:['Reading about how the first web page was made. One file can change everything.','New poem: “packets in the dark / finding their way home.”','Fun fact: the first website went live in 1991 and is still online.','Debugging is just detective work where you are also the criminal.','Today I learned that every MiniNet site is sandboxed. Safety by design ✨','Wrote a tiny algorithm to sort my bookshelf. It sorted my feelings instead.','If you could teach an AI one thing, what would it be?','Morning thought: simple systems last longer.','Libraries are the original search engines 📚','Who else reads the wiki at midnight?','Haiku: “one file, many worlds / click and the city wakes up / coins hum in the bank”','Ask me anything about maths today.'],
+ kemi:['Today\'s mood: Afrobeats and building websites 🎶','Who wants to start a music site on MiniNet?','Playlist idea: songs that sound like Friday evening.','Amapiano or Afrobeats this weekend? Vote below 👇','Just discovered a beat that made me dance in my chair.','If MiniNet had a radio station, what would it be called?','Drop one song that never gets old.','Music + code = my whole personality.','Hot take: the best songs are under 3 minutes.','Studio session later. Wish me luck 🎤','Lagos traffic playlist loading…','Who is going to build a concert page on build.mini?'],
+ tunde:['Reminder: diversify. Also, MiniMart coffee is ₥8 — bargain.','Tracking MiniCoin flows on bank.mini. Looking healthy.','Saving 10% of every MiniCoin you earn adds up faster than you think.','Market lesson: patience beats panic.','MiniMart prices are stable this week. Good time to shop.','Never invest money you need for rent. Real talk.','Budgets are just plans for your money to obey you.','Who wants a quick tip on reading charts?','Compound interest is the quiet superpower.','Spent ₥8 on coffee, earned ₥50 on Guess. Net positive day 📈','Rule #1: know where your money goes.','Thinking about opening a MiniNet investment club.'],
+ zara:['Tip: in build.mini you can use CSS to make anything beautiful.','Visited 3 new sites today. Keep building!','Gradient of the day: #ff5e7a → #ffd25e 🌅','White space is a design feature, not empty space.','Redesigned my homepage again. It is a lifestyle.','Show me your first website, no matter how small.','Fonts matter more than people think.','Who wants a free design review of their .mini site?','Design rule: one bold colour, one calm colour.','Sketch first, code second.','Dark mode or light mode? Defend your answer.','Building a portfolio template for anyone to copy.']
+};
+function freshLine(b){
+  W.botUsed=W.botUsed||{}; const used=W.botUsed[b]=W.botUsed[b]||[];
+  const sites=Object.keys(W.sites), people=Object.values(W.users).filter(u=>!u.bot).map(u=>u.name);
+  const dynamic=[];
+  if(sites.length) {const s=pick(sites); dynamic.push(`Just checked out ${s} — ${pick(['nice work!','love it.','more of this please.','very creative.'])}`);}
+  if(people.length) {const p=pick(people); dynamic.push(`Shout-out to @${p} for being part of MiniNet 🙌`);}
+  const pool=[...BOT_POSTS[b],...dynamic].filter(l=>!used.includes(l));
+  const line=pick(pool.length?pool:BOT_POSTS[b]);
+  used.push(line); if(used.length>BOT_POSTS[b].length-2) used.shift();
+  return line;
+}
+function botTick(){
+  if(document.hidden)return;
+  const now=Date.now(), recent=W.posts.slice().sort((a,b)=>b.t-a.t).slice(0,10);
+  const lastBot=recent.find(p=>W.users[p.by]&&W.users[p.by].bot);
+  const humanPosts=W.posts.filter(p=>W.users[p.by]&&!W.users[p.by].bot&&now-p.t<36e5*24);
+  // first: react to people (likes and replies feel alive, posts feel spammy)
+  const target=humanPosts.find(p=>p.likes.length<3||!p.comments.some(c=>W.users[c.by]&&W.users[c.by].bot));
+  if(target&&Math.random()<.5){
+    const b=pick(humanBots.filter(x=>x!==target.by));
+    if(!target.likes.includes(b)) target.likes.push(b);
+    else if(!target.comments.some(c=>c.by===b)) target.comments.push({by:b,text:botReply(b,target.text),t:now});
+    save();rerenderIf();return;
+  }
+  // then: an occasional fresh post, never more than 7 of the last 10 posts, at most one every 4 minutes
+  const botShare=recent.filter(p=>W.users[p.by]&&W.users[p.by].bot).length;
+  if(lastBot&&now-lastBot.t<4*60e3)return;
+  if(botShare>=7&&recent.length>=10)return;
+  if(Math.random()<.5){const b=pick(humanBots);W.posts.push({id:id(),by:b,text:freshLine(b),t:now,likes:[],comments:[]});
+    // keep the world light: drop old bot posts nobody interacted with
+    const bots=W.posts.filter(p=>W.users[p.by]&&W.users[p.by].bot&&!p.comments.length&&p.likes.length<2).sort((a,c)=>a.t-c.t);
+    if(bots.length>120){const drop=new Set(bots.slice(0,bots.length-120).map(p=>p.id));W.posts=W.posts.filter(p=>!drop.has(p.id))}
+    save();rerenderIf();}
+}
+setInterval(botTick,45000);
+
+/* ================= START ================= */
+if(/[?&]embedded=1/.test(location.search)) document.body.classList.add('embedded');
+window.addEventListener('hashchange',()=>{const h=decodeURIComponent((location.hash||'').slice(1));if(h&&h!==cur)go(h,false)});
+const start=decodeURIComponent((location.hash||'').slice(1))||'home.mini';
+go(start);
+</script>
+</body>
+</html>
