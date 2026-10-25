@@ -56,6 +56,9 @@ function setupSession() {
   const ua = ses.getUserAgent().replace(/\sElectron\/\S+/, '').replace(/\smininet-browser\/\S+/i, '').replace(/\sMiniNet Browser\/\S+/i, '');
   ses.setUserAgent(ua);
   app.userAgentFallback = ua;
+  // our own alert/confirm/prompt in every page frame (so pop-ups never freeze the page or an AI)
+  const pre = path.join(__dirname, 'page-preload.js');
+  try { if (ses.registerPreloadScript) ses.registerPreloadScript({ type: 'frame', id: 'mn-dialogs', filePath: pre }); else ses.setPreloads([pre]); } catch (e) { console.error('preload', e); }
 
   ses.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (d, cb) => {
     if (state.adblock && d.resourceType !== 'mainFrame' && isAd(d.url)) {
@@ -195,6 +198,21 @@ ipcMain.handle('clear-data', async (e, what) => {
 });
 ipcMain.handle('version', () => app.getVersion());
 ipcMain.on('copy', (e, t) => clipboard.writeText(String(t)));
+
+/* ---------------- page pop-ups (alert / confirm / prompt) ---------------- */
+let dialogSeq = 0; const dialogWait = new Map();
+ipcMain.on('mn-dialog', async (e, d) => {
+  const reply = v => { try { e.returnValue = v; } catch {} };
+  try {
+    const ai = await agent.pageDialog(e.sender.id, d);
+    if (ai !== undefined) return reply(ai.value);
+    if (!win || win.isDestroyed()) return reply(d.type === 'confirm' ? false : d.type === 'prompt' ? null : undefined);
+    const id = ++dialogSeq;
+    const v = await new Promise(ok => { dialogWait.set(id, ok); win.webContents.send('page-dialog', { id, ...d }); });
+    reply(v);
+  } catch { reply(d.type === 'confirm' ? false : d.type === 'prompt' ? null : undefined); }
+});
+ipcMain.on('page-dialog-answer', (e, { id, value }) => { const f = dialogWait.get(id); if (f) { dialogWait.delete(id); f(value); } });
 
 /* ---------------- IPC: AI control ---------------- */
 ipcMain.handle('agent-tools', () => agent.toolList());

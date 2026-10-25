@@ -544,7 +544,13 @@ const AGENT_OPS = {
   close: ({ id }) => { const t = tabs.find(x => x.id === id); if (!t) throw new Error('No such tab'); closeTab(t); return true; },
   speak: ({ text }) => { speak(text); return true; },
   toast: ({ text }) => { toast(text); return true; },
-  'extensions-changed': ({ reload }) => { if (panelOpen === 'extensions') showPanel('extensions'); if (reload && active && !active.url.startsWith(START)) active.wv.reload(); return true; }
+  'extensions-changed': ({ reload, matches }) => {
+    if (panelOpen === 'extensions') showPanel('extensions');
+    if (!reload) return true;
+    const pats = (matches || ['<all_urls>']).map(p => p === '<all_urls>' ? /^(https?|mini):/i : new RegExp('^' + String(p).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', 'i'));
+    tabs.forEach(t => { const u = display(t.url) && /mininet\/MiniNet\.html/.test(t.url) ? 'mini://' + (t.url.split('#')[1] || 'home') : t.url; if (!t.url.startsWith(START) && pats.some(r => r.test(u))) t.wv.reload(); });
+    return true;
+  }
 };
 window.app.on('agent-req', async ({ id, op, args }) => {
   try { const result = await AGENT_OPS[op](args || {}, id); window.app.agentRespond({ id, ok: true, result }); }

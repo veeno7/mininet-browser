@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('app', {
   agentTools: () => ipcRenderer.invoke('agent-tools'),
   agentCall: (name, args, client, owner) => ipcRenderer.invoke('agent-call', { name, args, client, owner }),
   agentRelease: (key) => ipcRenderer.invoke('agent-release', key),
+  pageDialogAnswer: (id, value) => ipcRenderer.send('page-dialog-answer', { id, value }),
   agentConfig: (c) => ipcRenderer.invoke('agent-config', c),
   agentLog: () => ipcRenderer.invoke('agent-log'),
   agentPause: (p) => ipcRenderer.send('agent-pause', p),

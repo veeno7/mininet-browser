@@ -625,3 +625,21 @@ async function renderMission(body, id) {
   $('#msDel').onclick = async () => { if (confirm('Delete this mission record?')) { await window.app.missions('delete', id); renderMissions(body); } };
 }
 window.app.on('agent-event', ev => { if (ev.type === 'mission' && panelOpen === 'missions') { const open = $('#msBack'); if (!open) showPanel('missions'); } });
+
+/* ================= Page pop-ups (alert / confirm / prompt) answered by the owner ================= */
+window.app.on('page-dialog', d => {
+  let host = ''; try { host = new URL(d.url).hostname || 'This page'; } catch { host = 'This page'; }
+  if (/MiniNet\.html/.test(d.url)) host = 'MiniNet Chat';
+  card('dlg' + d.id, `
+    <div class="hd"><img src="icon.png"><b>${esc(host)} says</b></div>
+    <div class="plan" style="white-space:pre-wrap">${esc(d.message || '')}</div>
+    ${d.type === 'prompt' ? `<input value="${esc(d.def || '')}">` : ''}
+    <div class="acts"><button class="btn sun" data-a="ok">OK</button>${d.type !== 'alert' ? '<button class="btn" data-a="cancel">Cancel</button>' : ''}</div>`,
+    (el, done) => {
+      const inp = el.querySelector('input');
+      const ok = () => done(d.type === 'confirm' ? true : d.type === 'prompt' ? inp.value : null);
+      el.querySelector('[data-a=ok]').onclick = ok;
+      const c = el.querySelector('[data-a=cancel]'); if (c) c.onclick = () => done(d.type === 'confirm' ? false : null);
+      if (inp) { inp.onkeydown = e => { if (e.key === 'Enter') ok(); }; setTimeout(() => { inp.focus(); inp.select(); }, 30); }
+    }).then(v => window.app.pageDialogAnswer(d.id, v));
+});

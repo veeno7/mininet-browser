@@ -54,8 +54,11 @@ async function tabWC(tab) {
   if (!wc || wc.isDestroyed()) throw new Error('That tab is not ready yet, try again in a moment.');
   return { tab: t, wc };
 }
-async function waitLoad(wc, timeout = 15000) {
+// grace: how long to watch for a page load that an action (click, Enter) may start a little later
+async function waitLoad(wc, timeout = 15000, grace = 0) {
+  const t0 = Date.now();
   await sleep(250);
+  if (grace) while (!wc.isLoading() && Date.now() - t0 < grace) await sleep(100);
   const start = Date.now();
   while (wc.isLoading() && Date.now() - start < timeout) await sleep(150);
   await sleep(150);
@@ -295,7 +298,7 @@ const TOOLS = {
     run: async a => {
       const { wc } = await tabWC(a.tab); const p = await pointFor(wc, a);
       const before = wc.getURL();
-      await mouseClick(wc, p, { count: a.double ? 2 : 1, button: a.right ? 'right' : 'left' }); await waitLoad(wc);
+      await mouseClick(wc, p, { count: a.double ? 2 : 1, button: a.right ? 'right' : 'left' }); await waitLoad(wc, 15000, p.tag === 'a' || /submit|button/i.test(p.tag || '') || p.href ? 1200 : 700);
       const out = { clicked: a.ref ?? a.text ?? a.selector ?? [a.x, a.y], element: p.tag ? `${p.tag} "${p.name || ''}"${p.inFrame ? ' (in embedded frame)' : ''}` : undefined, url: displayUrl(wc.getURL()), title: wc.getTitle(), navigated: wc.getURL() !== before };
       if (p.covered) out.warning = `Something was covering the target, so the click landed on ${p.covered}. Close that popup/banner first (snapshot to find its button), then click again.`;
       return text(out);
@@ -319,7 +322,7 @@ const TOOLS = {
             if (!document.execCommand('insertText', false, ${JSON.stringify(String(a.text))})) { const proto = e.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; const d = Object.getOwnPropertyDescriptor(proto, 'value'); if (d) d.set.call(e, ${a.append ? "e.value + " : ""}${JSON.stringify(String(a.text))}); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); }
             return true; })()`);
           if (!ok) throw new Error('Could not focus that field');
-          if (a.submit) { await fjs(p.frame, `(() => { const e = document.activeElement; const o = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }; e.dispatchEvent(new KeyboardEvent('keydown', o)); e.dispatchEvent(new KeyboardEvent('keypress', o)); e.dispatchEvent(new KeyboardEvent('keyup', o)); if (e.form) { if (e.form.requestSubmit) e.form.requestSubmit(); else e.form.submit(); } })()`).catch(() => {}); await waitLoad(wc); }
+          if (a.submit) { await fjs(p.frame, `(() => { const e = document.activeElement; const o = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }; e.dispatchEvent(new KeyboardEvent('keydown', o)); e.dispatchEvent(new KeyboardEvent('keypress', o)); e.dispatchEvent(new KeyboardEvent('keyup', o)); if (e.form) { if (e.form.requestSubmit) e.form.requestSubmit(); else e.form.submit(); } })()`).catch(() => {}); await waitLoad(wc, 15000, 1200); }
           return text({ typed: a.text.length + ' characters', inEmbeddedFrame: true, submitted: !!a.submit, url: displayUrl(wc.getURL()) });
         }
         await mouseClick(wc, p);
@@ -327,7 +330,7 @@ const TOOLS = {
         if (!a.append) await fjs(p.frame, `(() => { const e = document.activeElement; if (!e) return; if ('value' in e && typeof e.select === 'function') { e.select(); } else { document.execCommand('selectAll'); } })()`).catch(() => {});
       }
       wc.insertText(String(a.text));
-      if (a.submit) { await sleep(80); pressKey(wc, 'Enter'); await waitLoad(wc); }
+      if (a.submit) { await sleep(80); pressKey(wc, 'Enter'); await waitLoad(wc, 15000, 1200); }
       return text({ typed: a.text.length + ' characters', submitted: !!a.submit, url: displayUrl(wc.getURL()) });
     }
   },
@@ -350,7 +353,7 @@ const TOOLS = {
   press_key: {
     description: 'Press a key or combo, e.g. "Enter", "Escape", "Tab", "ArrowDown", "ctrl+a", "shift+Tab".',
     schema: { key: { type: 'string' }, ...TAB }, required: ['key'],
-    run: async a => { const { wc } = await tabWC(a.tab); pressKey(wc, a.key); await waitLoad(wc, 8000); return text('pressed ' + a.key); }
+    run: async a => { const { wc } = await tabWC(a.tab); pressKey(wc, a.key); await waitLoad(wc, 8000, /enter/i.test(a.key) ? 1200 : 0); return text('pressed ' + a.key); }
   },
   scroll: {
     description: 'Scroll the page. direction up/down (default one screen), or to top/bottom, or bring an element (ref/selector) into view.',
@@ -454,9 +457,9 @@ const TOOLS = {
     description: 'Create or update a browser extension. An extension is content.js (JavaScript run inside matching pages after they load) plus optional content.css. matches are address patterns like "*://*.youtube.com/*", "mini://*" or "<all_urls>". Pass an existing id to update it. Matching open tabs are reloaded so it takes effect.',
     schema: { id: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' }, matches: { type: 'array', items: { type: 'string' } }, js: { type: 'string' }, css: { type: 'string' } },
     required: ['name'],
-    run: async a => { const r = ext.save({ ...a, author: a.author || 'AI' }); ext.setEnabled(r.id, true); await shellReq('extensions-changed', { reload: true }); return text({ saved: r.id, ...r, enabled: true }); }
+    run: async a => { const r = ext.save({ ...a, author: a.author || 'AI' }); ext.setEnabled(r.id, true); await shellReq('extensions-changed', { reload: true, matches: r.matches || a.matches || ['<all_urls>'] }); return text({ saved: r.id, ...r, enabled: true }); }
   },
-  toggle_extension: { description: 'Turn an extension on or off.', schema: { id: { type: 'string' }, enabled: { type: 'boolean' } }, required: ['id', 'enabled'], run: async a => { ext.setEnabled(a.id, a.enabled); await shellReq('extensions-changed', { reload: true }); return text('ok'); } },
+  toggle_extension: { description: 'Turn an extension on or off.', schema: { id: { type: 'string' }, enabled: { type: 'boolean' } }, required: ['id', 'enabled'], run: async a => { ext.setEnabled(a.id, a.enabled); const m = (ext.list().find(x => x.id === a.id) || {}).matches; await shellReq('extensions-changed', { reload: true, matches: m || ['<all_urls>'] }); return text('ok'); } },
   delete_extension: { description: 'Remove an extension.', schema: { id: { type: 'string' } }, required: ['id'], run: async a => { ext.remove(a.id); await shellReq('extensions-changed', {}); return text('deleted'); } }
 };
 
@@ -627,6 +630,14 @@ function deleteMission(id) {
   missions.delete(id); notify({ type: 'mission', id, status: 'deleted' }); return true;
 }
 
+Object.assign(TOOLS, {
+  answer_dialog: {
+    description: 'Choose how the NEXT pop-up (alert / confirm "Are you sure?" / prompt asking for text) in a tab is answered. Without this, pop-ups in a tab you are working in are answered OK (prompts get their default text) and the result tells you what was shown.',
+    schema: { accept: { type: 'boolean', description: 'true = OK, false = Cancel' }, text: { type: 'string', description: 'Text to enter if it is a prompt' }, ...TAB }, required: ['accept'],
+    run: async a => { const { tab } = await tabWC(a.tab); dialogAnswers.set(tab.id, { accept: !!a.accept, text: a.text }); return text(`The next pop-up in tab ${tab.id} will be answered ${a.accept ? 'OK' : 'Cancel'}${a.text != null ? ' with "' + a.text + '"' : ''}.`); }
+  }
+});
+
 /* ---------------- helper agents: an AI can start more AIs, each in its own tab ---------------- */
 Object.assign(TOOLS, {
   start_helper: {
@@ -680,7 +691,7 @@ function prompt(key, op, args) {
 }
 function waitShort(p) { return Promise.race([p, new Promise(r => setTimeout(() => r(WAITING), TOOL_WAIT))]); }
 const approvals = new Map();   // client -> { plan, t }
-const NO_APPROVAL_NEEDED = new Set(['check_helpers', 'mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
+const NO_APPROVAL_NEEDED = new Set(['answer_dialog', 'check_helpers', 'mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
 function setApproved(client, plan) { approvals.set(client, { plan: plan || '', t: Date.now() }); notify({ type: 'approvals' }); }
 async function ensureApproved(client, name, args) {
   if (cfg.mode === 'auto' || client === 'Orbit' || /^Orbit · Helper \d+$/.test(client) || approvals.has(client) || isTrusted(client) || NO_APPROVAL_NEEDED.has(name)) return;
@@ -691,26 +702,51 @@ async function ensureApproved(client, name, args) {
 }
 
 /* ---------------- many AIs at once: each AI (and each helper agent) works in its own tab ---------------- */
-const owners = new Map();            // owner key -> { tab, client, at, color }
-const IDLE_MS = 3 * 60 * 1000;       // an AI that has been quiet this long gives its tab back
+const owners = new Map();            // owner key -> { tab (current), tabs: Map(tabId -> last use), client, at, color }
+const IDLE_MS = 3 * 60 * 1000;       // an AI that has been quiet this long gives its tabs back
 const AGENT_COLORS = ['#2dd4bf', '#f59e0b', '#a78bfa', '#f472b6', '#60a5fa', '#34d399', '#fb7185', '#facc15'];
 let colorSeq = 0;
-function busyOwnerOf(tabId, exceptKey) { for (const [k, o] of owners) if (k !== exceptKey && o.tab === tabId && Date.now() - o.at < IDLE_MS) return { key: k, ...o }; return null; }
+function busyOwnerOf(tabId, exceptKey) { for (const [k, o] of owners) { const t = o.tabs.get(tabId); if (k !== exceptKey && t && Date.now() - t < IDLE_MS) return { key: k, ...o }; } return null; }
 function anotherBusy(key) { for (const [k, o] of owners) if (k !== key && Date.now() - o.at < 60000) return true; return false; }
+function badge(tabId) { // show the most recent AI working in a tab (or none)
+  let best = null; for (const o of owners.values()) { const t = o.tabs.get(tabId); if (t && Date.now() - t < IDLE_MS && (!best || t > best.t)) best = { t, o }; }
+  shellReq('owner', { id: tabId, name: best ? best.o.client : null, color: best ? best.o.color : null }).catch(() => {});
+}
 function claim(key, client, tabId) {
   let o = owners.get(key);
-  if (!o) { o = { color: AGENT_COLORS[colorSeq++ % AGENT_COLORS.length] }; owners.set(key, o); }
-  const moved = o.tab !== tabId;
-  Object.assign(o, { tab: tabId, client, at: Date.now() });
-  if (moved || !o.shown) { o.shown = true; shellReq('owner', { id: tabId, name: client, color: o.color }).catch(() => {}); }
+  if (!o) { o = { color: AGENT_COLORS[colorSeq++ % AGENT_COLORS.length], tabs: new Map() }; owners.set(key, o); }
+  const fresh = !o.tabs.has(tabId) || Date.now() - o.tabs.get(tabId) > 20000;
+  Object.assign(o, { tab: tabId, client, at: Date.now() }); o.tabs.set(tabId, Date.now());
+  if (fresh) badge(tabId);
   return o;
 }
 function release(key) {
   const o = owners.get(key); if (!o) return;
   owners.delete(key);
-  if (![...owners.values()].some(x => x.tab === o.tab)) shellReq('owner', { id: o.tab, name: null }).catch(() => {});
+  for (const id of o.tabs.keys()) badge(id);
 }
-setInterval(() => { for (const [k, o] of owners) if (Date.now() - o.at > IDLE_MS) release(k); }, 20000).unref?.();
+setInterval(() => {
+  for (const [k, o] of owners) {
+    for (const [id, t] of o.tabs) if (Date.now() - t > IDLE_MS) { o.tabs.delete(id); badge(id); }
+    if (!o.tabs.size) owners.delete(k);
+  }
+}, 20000).unref?.();
+
+/* page pop-ups: an AI working in a tab answers them (OK by default, or as set with answer_dialog); otherwise the owner does */
+const dialogAnswers = new Map(), dialogLog = new Map();
+async function pageDialog(wcId, d) {
+  const t = (await shellReq('list')).find(x => x.wcId === wcId); if (!t) return undefined;
+  const pre = dialogAnswers.get(t.id), busy = busyOwnerOf(t.id);
+  if (!pre && !busy) return undefined;
+  if (pre) dialogAnswers.delete(t.id);
+  const accept = pre ? pre.accept : true;
+  const value = d.type === 'alert' ? undefined : d.type === 'confirm' ? accept : (accept ? (pre && pre.text != null ? String(pre.text) : d.def) : null);
+  const said = d.type === 'alert' ? 'OK' : !accept ? 'Cancel' : d.type === 'prompt' ? `OK with "${value}"` : 'OK';
+  const entry = `${d.type} pop-up "${String(d.message).slice(0, 200)}" was answered ${said}`;
+  if (!dialogLog.has(t.id)) dialogLog.set(t.id, []); dialogLog.get(t.id).push(entry);
+  shellReq('toast', { text: (busy ? busy.client : 'AI') + ': ' + entry.slice(0, 120) }).catch(() => {});
+  return { value };
+}
 async function ownTab(key, client) {
   const tabs = await shellReq('list');
   const mine = owners.get(key);
@@ -748,6 +784,7 @@ async function call(name, args = {}, client = 'AI agent', ownerKey) {
     else r = await t.run(args || {}, client);
     if (name === 'open_tab') { try { const id = JSON.parse(r.content[0].text).opened; if (id) claim(key, client, id); } catch {} }
     if (name === 'switch_tab') claim(key, client, +args.tab);
+    if (args.tab != null && dialogLog.has(+args.tab)) { note = (note ? note + ' ' : '') + dialogLog.get(+args.tab).join('; ') + '. (Use answer_dialog first to choose Cancel or a different answer.)'; dialogLog.delete(+args.tab); }
     if (note && r && r.content) r = { ...r, content: [...r.content, { type: 'text', text: 'Note: ' + note }] };
     entry.ok = true; notify({ type: 'activity', ...entry, status: 'done' });
     return r;
@@ -770,7 +807,7 @@ You can also create browser extensions with save_extension. You cannot change th
 // OpenAPI description so ChatGPT custom GPTs (Actions) and other tool-calling AIs can use the browser too
 let publicUrl = null;
 function setPublicUrl(u) { publicUrl = u || null; }
-const OPENAPI_SKIP = new Set(['mission_note', 'mission_report', 'get_extension', 'toggle_extension', 'delete_extension', 'hover', 'go_forward', 'stop_helper']);  // ChatGPT Actions allow 30
+const OPENAPI_SKIP = new Set(['mission_note', 'mission_report', 'get_extension', 'toggle_extension', 'delete_extension', 'hover', 'go_forward', 'stop_helper', 'speak']);  // ChatGPT Actions allow 30
 function openApi(token) {
   const base = (publicUrl || `http://127.0.0.1:${cfg.port}`) + (token ? '/t/' + token : '');
   const paths = {};
@@ -895,4 +932,4 @@ function init({ userData, shell, onEvent }) {
   start();
 }
 
-module.exports = { init, listMissions, getMission, deleteMission, missionsDir: () => missionsDir, call, toolList, getConfig, setConfig, setPaused, getLog: () => log.slice(0, 100), INSTRUCTIONS, displayUrl, setPublicUrl, release, agentsSummary };
+module.exports = { init, listMissions, getMission, deleteMission, missionsDir: () => missionsDir, call, toolList, getConfig, setConfig, setPaused, getLog: () => log.slice(0, 100), INSTRUCTIONS, displayUrl, setPublicUrl, release, agentsSummary, pageDialog };
