@@ -19,7 +19,8 @@ contextBridge.exposeInMainWorld('app', {
   agentInstructions: () => ipcRenderer.invoke('agent-instructions'),
   mcpConfigs: () => ipcRenderer.invoke('mcp-configs'),
   connectClaudeDesktop: () => ipcRenderer.invoke('connect-claude-desktop'),
-  tunnel: (op) => ipcRenderer.invoke('tunnel', op),
+  tunnel: (op, opts) => ipcRenderer.invoke('tunnel', op, opts),
+  missions: (op, id) => ipcRenderer.invoke('missions', { op, id }),
   // extensions
   ext: (op, o = {}) => ipcRenderer.invoke('ext', { op, ...o }),
   // Orbit

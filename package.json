@@ -1,14 +1,14 @@
 {
   "name": "mininet-browser",
   "productName": "MiniNet Browser",
-  "version": "1.4.2",
-  "description": "MiniNet Browser \u2014 the real web, plus a tiny internet of your own, built for AI agents.",
+  "version": "1.6.0",
+  "description": "MiniNet Browser \u2014 the browser any AI can use as its eyes and hands.",
   "main": "main.js",
   "author": "Seyi",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "electron-packager . MiniNetBrowser --platform=win32 --arch=x64 --icon=icon.ico --out=dist --overwrite --asar --ignore=^/dist --ignore=^/docs --ignore=^/\\.github --ignore=^/test"
+    "build": "electron-packager . MiniNetBrowser --platform=win32 --arch=x64 --icon=icon.ico --out=dist --overwrite --asar --ignore=^/dist --ignore=^/docs --ignore=^/\\.github --ignore=^/test --ignore=^/\\.ezip"
   },
   "devDependencies": {
     "electron": "38.8.6",

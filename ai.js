@@ -41,11 +41,12 @@ window.app.on('agent-req-cancel', ({ id }) => { const el = openCards.get(id); if
 AGENT_OPS.approve = ({ client, plan, action }, id) => card(id, `
   <div class="hd"><img src="icon.png"><b>${esc(client)} wants to use your browser</b></div>
   ${plan ? `<div class="plan">${esc(plan)}</div>` : `<div class="plan">First step: ${esc(action || 'act on a page')}</div>`}
-  <small>If you allow it, it will carry on by itself — signing in, accepting cookies, clicking Continue — until the job is done. You can press Stop AI any time.</small>
+  <small>Once allowed, it carries on by itself — signing in, accepting cookies, clicking Continue. <b>Always allow</b> means it never has to ask again (change it any time in AI control). You can press Stop AI whenever you like.</small>
   <input placeholder="Optional message to the AI">
-  <div class="acts"><button class="btn sun" data-a="allow">Allow</button><button class="btn" data-a="deny">Deny</button></div>`,
+  <div class="acts"><button class="btn sun" data-a="always">Always allow</button><button class="btn" data-a="allow">Just this time</button><button class="btn" data-a="deny">Deny</button></div>`,
   (el, done) => {
     const msg = () => el.querySelector('input').value.trim();
+    el.querySelector('[data-a=always]').onclick = () => done({ allow: true, always: true, reason: msg() });
     el.querySelector('[data-a=allow]').onclick = () => done({ allow: true, reason: msg() });
     el.querySelector('[data-a=deny]').onclick = () => done({ allow: false, reason: msg() });
   });
@@ -118,7 +119,7 @@ function paintConvo() {
   const box = $('#oMsgs'); if (!box) return;
   if (!convo.length) {
     box.innerHTML = `<div class="oHello"><img src="icon.png"><b>Hi, I'm Orbit</b>I can browse, click, type, shop, post and build for you — on the real web and inside MiniNet.
-      <div class="chips">${['Summarize this page', 'Post a chirp on MiniNet saying hello', 'Find the cheapest laptop on MiniMart and buy it', 'Build an extension that adds a dark mode to every site', 'Search YouTube for afrobeats mixes'].map(c => `<span class="chip">${c}</span>`).join('')}</div></div>`;
+      <div class="chips">${['Summarize this page', 'Post a chirp on MiniNet saying hello', 'Find the top story on Hacker News and summarize it', 'Build an extension that adds a dark mode to every site', 'Search YouTube for afrobeats mixes'].map(c => `<span class="chip">${c}</span>`).join('')}</div></div>`;
     box.querySelectorAll('.chip').forEach(c => c.onclick = () => { $('#oText').value = c.textContent; sendOrbit(); });
     return;
   }
@@ -378,11 +379,17 @@ async function renderAgents(body) {
     <div class="set"><b>Before an AI starts</b>
       <select class="inp" id="agMode"><option value="ask" ${c.mode !== 'auto' ? 'selected' : ''}>Ask me first — once I allow its plan, it carries on by itself</option><option value="auto" ${c.mode === 'auto' ? 'selected' : ''}>Don't ask — any connected AI can act straight away</option></select>
       <small>Orbit never needs approval: what you type to it is your permission.</small>
-      ${c.approved.length ? '<div style="margin-top:8px">' + c.approved.map(a => `<div class="pi"><div class="tx"><div>✓ ${esc(a.client)}</div><small>${esc(a.plan || 'allowed')}</small></div><button class="btn sm" data-revoke="${esc(a.client)}">Revoke</button></div>`).join('') + '</div>' : ''}</div>
+      ${c.approved.length ? '<div style="margin-top:8px">' + c.approved.map(a => `<div class="pi"><div class="tx"><div>✓ ${esc(a.client)}${a.always ? ' <span class="ok">· always allowed</span>' : ''}</div><small>${esc(a.plan || (a.always ? 'never needs to ask' : 'allowed'))}</small></div><button class="btn sm" data-revoke="${esc(a.client)}">Remove</button></div>`).join('') + '</div>' : ''}</div>
 
     <div class="set"><b>🌍 Connector link — Claude.ai, ChatGPT &amp; any AI on the internet</b>
-      <small>Creates a private, secure web link to this browser so cloud AIs can use it as their browser. Paste it into Claude → Customize → Connectors → Add custom connector (or ChatGPT → Settings → Connectors). Approval cards still protect you.</small>
+      <small>A private, secure web link so cloud AIs (Claude.ai, ChatGPT, Gemini agents…) can use this browser as their eyes and hands. Approval cards still protect you.</small>
       <div id="tunBox"></div></div>
+
+    <div class="set"><b>💻 Local link — AIs on this computer (Ollama tools, LM Studio, scripts)</b>
+      <small>Permanent while this browser is open. Any MCP app on this computer can use it directly; OpenAPI tools can use the second link.</small>
+      <div class="codebox">http://127.0.0.1:${c.port}/t/••••••/mcp</div>
+      <button class="btn sm" data-copy-raw="${esc(`http://127.0.0.1:${c.port}/t/${c.token}/mcp`)}">Copy MCP link</button> <button class="btn sm" data-copy-raw="${esc(`http://127.0.0.1:${c.port}/t/${c.token}/openapi.json`)}">Copy OpenAPI link</button>
+      <small style="margin-top:6px">Running a local model? Choose <b>Ollama</b> in Orbit settings and it drives the browser for free.</small></div>
 
     <div class="set"><b>Claude Desktop</b><small>One click adds MiniNet Browser to Claude's tools. Restart Claude afterwards.</small>
       <button class="btn sun wide" id="agClaude">Connect Claude Desktop</button></div>
@@ -420,23 +427,59 @@ async function renderAgents(body) {
   renderAgentLog();
 }
 let tunState = { status: 'off' };
+let tunEditing = false;
 function paintTunnel(t, token) {
   tunState = t || tunState;
   const box = $('#tunBox'); if (!box) return;
   const tk = token || box.dataset.token || ''; box.dataset.token = tk;
   const t2 = tunState;
+  const ngrok = t2.provider === 'ngrok';
+  const tabs = `<div class="seg" style="display:flex;gap:6px;margin:8px 0">
+      <button class="btn sm ${ngrok ? 'sun' : ''}" data-prov="ngrok">🔒 Permanent link (ngrok · free)</button>
+      <button class="btn sm ${!ngrok ? 'sun' : ''}" data-prov="cloudflare">⚡ Quick link (changes each time)</button></div>`;
+  const wire = () => {
+    box.querySelectorAll('[data-prov]').forEach(b => b.onclick = async () => { tunEditing = b.dataset.prov === 'ngrok' && !t2.hasNgrokKey; paintTunnel(await window.app.tunnel('setup', { provider: b.dataset.prov })); });
+    const o = $('#tunOpenNg'); if (o) o.onclick = () => newTab('https://dashboard.ngrok.com/get-started/your-authtoken');
+    const d = $('#tunOpenDom'); if (d) d.onclick = () => newTab('https://dashboard.ngrok.com/domains');
+    const sv = $('#tunSave'); if (sv) sv.onclick = async () => {
+      const key = $('#tunKey').value.trim(), dom = $('#tunDom').value.trim();
+      if (!key && !t2.hasNgrokKey) return toast('Paste your ngrok authtoken first');
+      const opts = { provider: 'ngrok', domain: dom }; if (key) opts.ngrokKey = key;
+      tunEditing = false;
+      await window.app.tunnel('setup', opts);
+      paintTunnel(await window.app.tunnel('start'));
+    };
+    const ed = $('#tunEdit'); if (ed) ed.onclick = () => { tunEditing = true; paintTunnel(); };
+    const st = $('#tunStart'); if (st) st.onclick = async () => paintTunnel(await window.app.tunnel('start'));
+    const sp = $('#tunStop'); if (sp) sp.onclick = async () => paintTunnel(await window.app.tunnel('stop'));
+  };
+  if (ngrok && (tunEditing || !t2.hasNgrokKey) && t2.status !== 'on') {
+    box.innerHTML = tabs + `<small>One-time setup, about 1 minute. The link then <b>never changes</b> — paste it into your AI once and it keeps working every time this browser is open.</small>
+      <ol style="margin:8px 0 8px 18px;padding:0;font-size:12.5px;line-height:1.6">
+        <li>Make a free ngrok account and copy your <b>authtoken</b> — <a href="#" id="tunOpenNg">open ngrok</a></li>
+        <li>Paste it here:<input class="inp" id="tunKey" type="password" placeholder="${t2.hasNgrokKey ? 'saved ✓ — paste again to change' : 'ngrok authtoken'}"></li>
+        <li>Your free permanent address (optional — leave blank to use the one ngrok gives your account): <a href="#" id="tunOpenDom">see my domain</a><input class="inp" id="tunDom" value="${esc(t2.domain || '')}" placeholder="something.ngrok-free.app"></li>
+      </ol>
+      ${t2.error ? `<small class="bad">${esc(t2.error)}</small>` : ''}
+      <button class="btn sun wide" id="tunSave">Save and turn on the permanent link</button>`;
+    return wire();
+  }
   if (t2.status === 'on' && t2.url) {
-    const link = `${t2.url}/t/${tk}/mcp`;
-    box.innerHTML = `<div class="codebox">${esc(t2.url)}/t/••••••/mcp</div>
-      <button class="btn sun sm" id="tunCopy">Copy connector link</button> <button class="btn sm" id="tunStop">Turn off</button>
-      <small style="margin-top:8px">In Claude: <b>Customize → Connectors → + Add → Add custom connector</b>, name it "MiniNet Browser", paste the link, choose <b>No sign in</b>. The link changes each time you turn it on — paste the new one when it does.</small>`;
-    $('#tunCopy').onclick = () => { window.app.copy(link); toast('Connector link copied — keep it private'); };
-    $('#tunStop').onclick = () => window.app.tunnel('stop');
-  } else if (t2.status === 'downloading') box.innerHTML = `<small>Downloading the secure tunnel tool (one time)… ${t2.progress || 0}%</small><div class="bar"><b style="width:${t2.progress || 0}%"></b></div>`;
-  else if (t2.status === 'starting') box.innerHTML = '<small>Opening a secure link…</small>';
+    const mcp = `${t2.url}/t/${tk}/mcp`, api = `${t2.url}/t/${tk}/openapi.json`;
+    box.innerHTML = tabs + `<div class="codebox">${esc(t2.url)}/t/••••••/mcp</div>
+      <button class="btn sun sm" id="tunCopy">Copy connector link</button> <button class="btn sm" id="tunCopyApi">Copy ChatGPT Actions link</button> <button class="btn sm" id="tunStop">Turn off</button>${ngrok ? ' <button class="btn sm" id="tunEdit">Settings</button>' : ''}
+      <small style="margin-top:8px"><b>Claude.ai:</b> Customize → Connectors → + Add custom connector → name "MiniNet Browser", paste the connector link, choose <b>No sign in</b>.<br>
+      <b>ChatGPT:</b> Settings → Connectors (developer mode) → paste the connector link. For a custom GPT: Configure → Actions → Import from URL → paste the Actions link.<br>
+      ${ngrok ? '✅ This link is <b>permanent</b> — it stays the same every time the browser opens.' : '⚠️ This quick link changes each time — switch to the permanent link to paste it only once.'} Keep it private: it is the key to your browser.</small>`;
+    $('#tunCopy').onclick = () => { window.app.copy(mcp); toast('Connector link copied — keep it private'); };
+    $('#tunCopyApi').onclick = () => { window.app.copy(api); toast('ChatGPT Actions link copied'); };
+    return wire();
+  }
+  if (t2.status === 'downloading') box.innerHTML = `<small>Downloading the secure link tool (one time)… ${t2.progress || 0}%</small><div class="bar"><b style="width:${t2.progress || 0}%"></b></div>`;
+  else if (t2.status === 'starting') box.innerHTML = '<small>Opening a secure link…</small>' + (t2.error ? `<small class="bad">${esc(t2.error)}</small>` : '');
   else {
-    box.innerHTML = `${t2.error ? `<small class="bad">${esc(t2.error)}</small>` : ''}<button class="btn sun wide" id="tunStart">Create connector link</button>`;
-    $('#tunStart').onclick = () => window.app.tunnel('start');
+    box.innerHTML = tabs + `${t2.error ? `<small class="bad">${esc(t2.error)}</small>` : ''}<button class="btn sun wide" id="tunStart">${ngrok ? 'Turn on permanent link' : 'Create quick link'}</button>${ngrok ? ' <button class="btn sm" id="tunEdit" style="margin-top:6px">ngrok settings</button>' : ''}`;
+    wire();
   }
 }
 window.app.on('tunnel', t => { tunState = t; paintTunnel(t); if (t.status === 'on' && panelOpen !== 'agents') toast('Connector link is ready — open AI control to copy it'); });
@@ -486,3 +529,40 @@ async function editExtension(body, id) {
   };
   $('#eBack').onclick = () => renderExtensions(body);
 }
+
+/* ================= Missions ================= */
+PANELS.missions = { title: 'Missions', wide: true, render: renderMissions };
+const STATUS_LABEL = { running: 'Running', verified: '✓ Verified', unverified: 'Unverified', failed: 'Failed', stopped: 'Stopped', interrupted: 'Interrupted' };
+async function renderMissions(body) {
+  body.className = '';
+  const list = await window.app.missions('list');
+  body.innerHTML = `<small style="color:var(--dim);display:block;margin-bottom:8px">When an AI runs a mission, every action is recorded with evidence, and the browser itself checks whether the goal was really achieved.</small>
+    ${list.length ? list.map(m => `<div class="mcard" data-id="${esc(m.id)}"><span class="mstat ${esc(m.status)}">${STATUS_LABEL[m.status] || esc(m.status)}</span>
+      <b>${esc(m.goal)}</b><small>${esc(m.client)} · ${new Date(m.started).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} · ${m.actions} actions · ${m.criteria.filter(c => c.status === 'passed').length}/${m.criteria.length} checks passed</small></div>`).join('')
+      : '<p style="color:var(--dim)">No missions yet. Ask any connected AI to “start a mission” — or try Orbit: “Start a mission to …”.</p>'}
+    <button class="btn wide" id="msFolder" style="margin-top:8px">Open missions folder</button>`;
+  body.querySelectorAll('.mcard').forEach(el => el.onclick = () => renderMission(body, el.dataset.id));
+  $('#msFolder').onclick = () => window.app.missions('folder');
+}
+async function renderMission(body, id) {
+  const m = await window.app.missions('get', id); if (!m) return renderMissions(body);
+  const img = f => f ? `<img src="${esc(m.dir + '/' + f)}" alt="" data-full="${esc(m.dir + '/' + f)}">` : '';
+  const ago = t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  body.innerHTML = `<span class="lnkback btn sm" id="msBack">← All missions</span>
+    <div style="margin:10px 0"><span class="mstat ${esc(m.status)}">${STATUS_LABEL[m.status] || esc(m.status)}</span></div>
+    <b style="font-size:15px">${esc(m.goal)}</b>
+    <small style="display:block;color:var(--dim);margin:4px 0 10px">${esc(m.client)} · budget ${m.limits.max_steps} actions${m.limits.allowed_sites.length ? ' · sites: ' + esc(m.limits.allowed_sites.join(', ')) : ''}</small>
+    ${m.summary ? `<div class="codebox" style="font-family:inherit">${esc(m.summary)}</div>` : ''}
+    <div class="day">Success criteria (checked by the browser)</div>
+    ${m.criteria.map(c => `<div class="crit"><span class="ico">${c.status === 'passed' ? '<span class="ok">✓</span>' : c.status === 'failed' ? '<span class="bad">✗</span>' : '○'}</span><div><div>${esc(c.text)}</div>
+      ${c.evidence ? `<small>${c.evidence.snippet ? '“…' + esc(c.evidence.snippet.slice(0, 160)) + '…”' : esc(c.evidence.reason)} — ${esc(c.evidence.check)} on ${esc(c.evidence.url)}</small>${img(c.evidence.shot)}` : '<small>Not checked yet</small>'}</div></div>`).join('')}
+    <div class="day">Timeline (${m.steps.length} steps)</div>
+    <div class="tl">${m.steps.map(s => `<div class="st ${s.ok === false ? 'bad' : s.tool === 'mission_note' ? 'note' : ''}"><div><b style="font-weight:600">${esc(s.summary)}</b> <span style="color:var(--dim);font-size:11px">${ago(s.t)}</span></div>
+      ${s.after ? `<small>${esc(s.after.title || '')} — ${esc(s.after.url || '')}</small>` : ''}${s.error ? `<small class="bad">${esc(s.error)}</small>` : ''}${s.warning ? `<small style="color:var(--sun2)">⚠ ${esc(s.warning)}</small>` : ''}${img(s.shot)}</div>`).join('')}</div>
+    <div class="orow" style="margin-top:12px"><button class="btn sm" id="msCopy">Copy report</button><button class="btn sm" id="msDel">Delete</button></div>`;
+  $('#msBack').onclick = () => renderMissions(body);
+  body.querySelectorAll('img[data-full]').forEach(i => i.onclick = () => newTab(i.dataset.full));
+  $('#msCopy').onclick = () => { const r = { goal: m.goal, status: m.status, summary: m.summary, criteria: m.criteria.map(c => ({ text: c.text, status: c.status, evidence: c.evidence && (c.evidence.snippet || c.evidence.reason), url: c.evidence && c.evidence.url })), steps: m.steps.map(s => `${s.n}. ${s.summary}${s.ok === false ? ' (failed)' : ''}`) }; window.app.copy(JSON.stringify(r, null, 2)); toast('Mission report copied'); };
+  $('#msDel').onclick = async () => { if (confirm('Delete this mission record?')) { await window.app.missions('delete', id); renderMissions(body); } };
+}
+window.app.on('agent-event', ev => { if (ev.type === 'mission' && panelOpen === 'missions') { const open = $('#msBack'); if (!open) showPanel('missions'); } });

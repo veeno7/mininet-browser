@@ -9,7 +9,7 @@ const path = require('path');
 const { webContents } = require('electron');
 const ext = require('./extensions');
 
-let cfg = { enabled: true, port: 7811, token: '', mode: 'ask' };
+let cfg = { enabled: true, port: 7811, token: '', mode: 'ask', trusted: [] };
 let cfgPath = '';
 let shellReq = null;       // (op, args) => Promise  — talks to the browser UI
 let notify = () => {};     // (event) => void        — activity feed for the UI
@@ -25,14 +25,16 @@ function loadConfig(userData) {
   saveConfig();
 }
 function saveConfig() { try { fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2)); } catch {} }
-function getConfig() { return { ...cfg, paused, approved: [...approvals.entries()].map(([client, a]) => ({ client, plan: a.plan, since: a.t })), url: `http://127.0.0.1:${cfg.port}`, mcpUrl: `http://127.0.0.1:${cfg.port}/mcp`, running: !!(server && server.listening) }; }
+function isTrusted(client) { return (cfg.trusted || []).includes(client); }
+function trust(client) { cfg.trusted = [...new Set([...(cfg.trusted || []), client])]; saveConfig(); notify({ type: 'approvals' }); }
+function getConfig() { return { ...cfg, paused, approved: [...new Set([...(cfg.trusted || []), ...approvals.keys()])].map(client => ({ client, always: isTrusted(client), plan: (approvals.get(client) || {}).plan || '', since: (approvals.get(client) || {}).t })), url: `http://127.0.0.1:${cfg.port}`, mcpUrl: `http://127.0.0.1:${cfg.port}/mcp`, running: !!(server && server.listening) }; }
 function setConfig(c) {
   const portChanged = c.port && +c.port !== cfg.port;
   if (typeof c.enabled === 'boolean') cfg.enabled = c.enabled;
   if (c.port) cfg.port = Math.max(1024, Math.min(65535, +c.port || 7811));
   if (c.mode === 'ask' || c.mode === 'auto') cfg.mode = c.mode;
-  if (c.revoke) approvals.delete(c.revoke);
-  if (c.revokeAll) approvals.clear();
+  if (c.revoke) { approvals.delete(c.revoke); cfg.trusted = (cfg.trusted || []).filter(n => n !== c.revoke); }
+  if (c.revokeAll) { approvals.clear(); cfg.trusted = []; }
   if (c.regenerate) cfg.token = crypto.randomBytes(24).toString('hex');
   saveConfig();
   if (portChanged || 'enabled' in c) restart();
@@ -216,7 +218,7 @@ const TOOLS = {
     schema: {}, run: async () => text((await shellReq('list')).map(t => ({ id: t.id, active: t.active, title: t.title, url: displayUrl(t.url), loading: t.loading })))
   },
   open_tab: {
-    description: 'Open a new tab. Accepts a web address (example.com), a search phrase, or a MiniNet address (chirp.mini / mini://bank.mini). Returns the new tab id.',
+    description: 'Open a new tab. Accepts a web address (example.com), a search phrase, or a MiniNet Chat address (chirp.mini / talk.mini). Returns the new tab id.',
     schema: { url: { type: 'string' }, background: { type: 'boolean', description: 'Open without switching to it' } }, required: ['url'],
     run: async a => { const t = await shellReq('open', { url: checkNavUrl(a.url), background: !!a.background }); const wc = webContents.fromId(t.wcId); if (wc) await waitLoad(wc); return text({ opened: t.id, title: wc ? wc.getTitle() : '', url: wc ? displayUrl(wc.getURL()) : a.url }); }
   },
@@ -428,10 +430,10 @@ const TOOLS = {
     description: 'Ask the browser owner to approve your plan before you start acting. Describe in plain words what you will do (e.g. "Sign up on example.com with your email, accept cookies, and order the blue sneakers in size 43"). Once approved you can carry out the plan without asking again.',
     schema: { plan: { type: 'string' } }, required: ['plan'],
     run: async (a, client) => {
-      if (approvals.has(client) || cfg.mode === 'auto' || client === 'Orbit') { setApproved(client, a.plan); return text('Approved — go ahead.'); }
+      if (approvals.has(client) || isTrusted(client) || cfg.mode === 'auto' || client === 'Orbit') { setApproved(client, a.plan); return text('Approved — go ahead.'); }
       const r = await waitShort(prompt(client + ':approve', 'approve', { client, plan: String(a.plan).slice(0, 2000) }));
       if (r === WAITING) return text('Still waiting — the owner has not pressed Allow yet in MiniNet Browser. Call request_permission again with the same plan to keep waiting.');
-      if (r && r.allow) { setApproved(client, a.plan); return text('The owner approved your plan. Go ahead and complete it without asking again.'); }
+      if (r && r.allow) { setApproved(client, a.plan); if (r.always) trust(client); return text('The owner approved your plan. Go ahead and complete it without asking again.'); }
       return { content: [{ type: 'text', text: 'The owner declined this plan.' + (r && r.reason ? ' They said: ' + r.reason : '') + ' Do not act; ask what they would like instead.' }], isError: true };
     }
   },
@@ -456,6 +458,173 @@ const TOOLS = {
   toggle_extension: { description: 'Turn an extension on or off.', schema: { id: { type: 'string' }, enabled: { type: 'boolean' } }, required: ['id', 'enabled'], run: async a => { ext.setEnabled(a.id, a.enabled); await shellReq('extensions-changed', { reload: true }); return text('ok'); } },
   delete_extension: { description: 'Remove an extension.', schema: { id: { type: 'string' } }, required: ['id'], run: async a => { ext.remove(a.id); await shellReq('extensions-changed', {}); return text('deleted'); } }
 };
+
+/* ================= Missions: goals, proof-carrying actions and a black-box record =================
+   An AI starts a mission with a goal and success criteria. Every action it takes is recorded with
+   before/after pages and a screenshot. Success criteria are checked by the browser itself against the
+   live page — the AI cannot simply claim it is done. Missions are saved to disk so they can be reviewed. */
+let missionsDir = '';
+const missions = new Map();          // id -> mission
+const activeMission = new Map();     // client -> mission id
+const ACTION_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'go_forward', 'reload', 'click', 'type', 'select_option', 'press_key', 'scroll', 'hover', 'run_js', 'download', 'save_extension', 'toggle_extension', 'delete_extension', 'close_tab', 'close_other_tabs', 'switch_tab']);
+const SHOT_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'go_forward', 'click', 'type', 'select_option', 'press_key']);
+function missionInit(userData) {
+  missionsDir = path.join(userData, 'missions');
+  fs.mkdirSync(missionsDir, { recursive: true });
+  for (const f of fs.readdirSync(missionsDir)) {
+    if (!f.endsWith('.json')) continue;
+    try { const m = JSON.parse(fs.readFileSync(path.join(missionsDir, f), 'utf8')); if (m.status === 'running') m.status = 'interrupted'; missions.set(m.id, m); } catch {}
+  }
+}
+const saveTimers = new Map();
+function saveMission(m, now) {
+  clearTimeout(saveTimers.get(m.id));
+  const w = () => { try { fs.writeFileSync(path.join(missionsDir, m.id + '.json'), JSON.stringify(m, null, 1)); } catch {} };
+  if (now) w(); else saveTimers.set(m.id, setTimeout(w, 300));
+  notify({ type: 'mission', id: m.id, status: m.status });
+}
+function redact(name, a) {
+  const o = { ...(a || {}) };
+  const secret = /pass|pwd|card|cvv|cvc|otp|pin|secret|token|iban|account.?num/i;
+  if (name === 'type' && (secret.test(String(o.selector || '')) || secret.test(String(o.field || '')))) o.text = '•••• (hidden)';
+  if (name === 'run_js' && o.code) o.code = String(o.code).slice(0, 400);
+  return o;
+}
+async function pageState(tab) {
+  try { const { wc, tab: t } = await tabWC(tab); return { tab: t.id, url: displayUrl(wc.getURL()), title: wc.getTitle(), wc }; } catch { return null; }
+}
+async function missionShot(m, wc, label) {
+  try {
+    let img = await wc.capturePage(); if (img.getSize().width > 640) img = img.resize({ width: 640 });
+    const file = `${m.id}-${String(m.steps.length).padStart(3, '0')}-${label}.jpg`;
+    fs.writeFileSync(path.join(missionsDir, file), img.toJPEG(60));
+    return file;
+  } catch { return null; }
+}
+function hostOf(u) { try { return new URL(/^[a-z]+:\/\//i.test(u) ? u : 'https://' + u).hostname.replace(/^www\./, ''); } catch { return ''; } }
+function checkMissionLimits(m, name, args) {
+  const used = m.steps.filter(s => ACTION_TOOLS.has(s.tool)).length;
+  if (ACTION_TOOLS.has(name) && used >= m.limits.max_steps) throw new Error(`Mission step budget used up (${m.limits.max_steps} actions). Call mission_finish, or ask_user for more steps.`);
+  if ((name === 'navigate' || name === 'open_tab') && m.limits.allowed_sites && m.limits.allowed_sites.length) {
+    const u = String(args.url || '');
+    const looksLikeSite = /\.[a-z]{2,}([/:?#]|$)/i.test(u) || /^[a-z]+:\/\//i.test(u);
+    if (looksLikeSite && !/\.mini\b|^mini:/i.test(u)) {
+      const h = hostOf(u);
+      if (!m.limits.allowed_sites.some(a => h === a.replace(/^www\./, '') || h.endsWith('.' + a.replace(/^www\./, '')))) throw new Error(`${h} is outside this mission's allowed sites (${m.limits.allowed_sites.join(', ')}).`);
+    }
+  }
+}
+async function recordStep(m, name, args, run) {
+  const before = await pageState(args && args.tab);
+  const step = { n: m.steps.length + 1, t: Date.now(), tool: name, summary: summarize(name, args || {}), args: redact(name, args), before: before && { url: before.url, title: before.title } };
+  m.steps.push(step);
+  try {
+    const r = await run();
+    step.ok = !(r && r.isError);
+    const txt = (r && r.content || []).filter(c => c.type === 'text').map(c => c.text).join(' ');
+    step.result = txt.slice(0, 300);
+    if (/"warning":/.test(txt)) step.warning = (txt.match(/"warning": "([^"]+)"/) || [])[1];
+    const after = await pageState(args && args.tab);
+    if (after) { step.after = { url: after.url, title: after.title }; if (SHOT_TOOLS.has(name)) step.shot = await missionShot(m, after.wc, name); }
+    saveMission(m);
+    return r;
+  } catch (e) {
+    step.ok = false; step.error = e.message;
+    const after = await pageState(args && args.tab);
+    if (after) { step.after = { url: after.url, title: after.title }; step.shot = await missionShot(m, after.wc, 'error'); }
+    saveMission(m);
+    throw e;
+  }
+}
+const CHECKS = {
+  text_on_page: (v) => `(() => { const t = document.body ? document.body.innerText : ''; const i = t.toLowerCase().indexOf(${JSON.stringify(String(v).toLowerCase())}); return i < 0 ? null : t.slice(Math.max(0, i - 80), i + ${String(v).length} + 80).replace(/\\s+/g, ' '); })()`,
+  element_exists: (v) => `(() => { const e = document.querySelector(${JSON.stringify(String(v))}); return e ? (e.outerHTML.slice(0, 200)) : null; })()`,
+  element_text: (v, sel) => `(() => { const e = document.querySelector(${JSON.stringify(String(sel || ''))}); if (!e) return null; const t = (e.innerText || e.value || '').trim(); return t.toLowerCase().includes(${JSON.stringify(String(v).toLowerCase())}) ? t.slice(0, 200) : null; })()`
+};
+function missionSummary(m) {
+  return { id: m.id, goal: m.goal, status: m.status, client: m.client, started: new Date(m.startedAt).toISOString(), ended: m.endedAt ? new Date(m.endedAt).toISOString() : null,
+    actions: m.steps.filter(s => ACTION_TOOLS.has(s.tool)).length, failed_actions: m.steps.filter(s => s.ok === false).length,
+    criteria: m.criteria.map(c => ({ n: c.n, text: c.text, status: c.status, evidence: c.evidence && (c.evidence.snippet || c.evidence.reason), checked_on: c.evidence && c.evidence.url })), summary: m.summary || '' };
+}
+function newId() { return new Date().toISOString().slice(0, 10).replace(/-/g, '') + '-' + crypto.randomBytes(3).toString('hex'); }
+
+Object.assign(TOOLS, {
+  mission_start: {
+    description: 'Start a mission: a goal with success criteria the browser will verify. Every action you take afterwards is recorded with evidence (pages + screenshots). Set max_steps and allowed_sites to keep the mission bounded. Finish with mission_finish.',
+    schema: { goal: { type: 'string' }, success_criteria: { type: 'array', items: { type: 'string' }, description: 'Plain-language outcomes that must be true at the end, e.g. "The order confirmation page shows order number"' }, max_steps: { type: 'integer', description: 'Action budget, default 40' }, allowed_sites: { type: 'array', items: { type: 'string' }, description: 'Optional list of domains this mission may visit, e.g. ["github.com"]. MiniNet .mini sites are always allowed.' } },
+    required: ['goal', 'success_criteria'],
+    run: async (a, client) => {
+      const prev = activeMission.get(client) && missions.get(activeMission.get(client));
+      if (prev && prev.status === 'running') { prev.status = 'stopped'; prev.endedAt = Date.now(); prev.summary = 'Replaced by a new mission.'; saveMission(prev, true); }
+      const crit = (a.success_criteria || []).map(String).filter(Boolean).slice(0, 20);
+      if (!crit.length) throw new Error('Give at least one success criterion.');
+      const m = { id: newId(), client, goal: String(a.goal).slice(0, 1000), status: 'running', startedAt: Date.now(),
+        limits: { max_steps: Math.min(Math.max(+a.max_steps || 40, 1), 500), allowed_sites: (a.allowed_sites || []).map(String).slice(0, 30) },
+        criteria: crit.map((t, i) => ({ n: i + 1, text: t, status: 'pending' })), steps: [], notes: [] };
+      missions.set(m.id, m); activeMission.set(client, m.id); saveMission(m, true);
+      return text({ mission: m.id, criteria: m.criteria.map(c => `${c.n}. ${c.text}`), limits: m.limits, next: 'Work towards the goal. When a criterion should be true, prove it with mission_verify (the browser checks the live page). Then call mission_finish.' });
+    }
+  },
+  mission_verify: {
+    description: 'Prove one success criterion. The browser itself checks the current page: text_on_page (value = text that must appear), element_exists (value = CSS selector), element_text (selector + value), or url_contains (value). The result and evidence are stored in the mission record.',
+    schema: { criterion: { type: 'integer', description: 'Criterion number from mission_start' }, check: { type: 'string', enum: ['text_on_page', 'element_exists', 'element_text', 'url_contains'] }, value: { type: 'string' }, selector: { type: 'string' }, ...TAB },
+    required: ['criterion', 'check', 'value'],
+    run: async (a, client) => {
+      const m = missions.get(activeMission.get(client));
+      if (!m || m.status !== 'running') throw new Error('No running mission. Call mission_start first.');
+      const c = m.criteria.find(x => x.n === +a.criterion); if (!c) throw new Error('No criterion ' + a.criterion);
+      const { wc } = await tabWC(a.tab);
+      let snippet = null;
+      if (a.check === 'url_contains') snippet = wc.getURL().includes(a.value) ? displayUrl(wc.getURL()) : null;
+      else {
+        if (!CHECKS[a.check]) throw new Error('Unknown check ' + a.check);
+        for (const f of framesOf(wc)) { snippet = await fjs(f, CHECKS[a.check](a.value, a.selector)).catch(() => null); if (snippet) break; }
+      }
+      const shot = await missionShot(m, wc, 'verify-' + c.n);
+      c.status = snippet ? 'passed' : 'failed';
+      c.evidence = { t: Date.now(), check: a.check, value: a.value, selector: a.selector, url: displayUrl(wc.getURL()), title: wc.getTitle(), snippet: snippet || null, reason: snippet ? null : 'Not found on the page when checked', shot };
+      m.steps.push({ n: m.steps.length + 1, t: Date.now(), tool: 'mission_verify', summary: `verify #${c.n}: ${c.status}`, ok: !!snippet, after: { url: c.evidence.url, title: c.evidence.title }, shot });
+      saveMission(m);
+      return text({ criterion: c.n, status: c.status, evidence: snippet || 'not found', remaining: m.criteria.filter(x => x.status !== 'passed').map(x => x.n) });
+    }
+  },
+  mission_note: {
+    description: 'Add an observation or decision to the mission record (e.g. why you chose an option, what you could not verify).',
+    schema: { text: { type: 'string' } }, required: ['text'],
+    run: async (a, client) => { const m = missions.get(activeMission.get(client)); if (!m) throw new Error('No mission'); m.notes.push({ t: Date.now(), text: String(a.text).slice(0, 2000) }); m.steps.push({ n: m.steps.length + 1, t: Date.now(), tool: 'mission_note', summary: String(a.text).slice(0, 120), ok: true }); saveMission(m); return text('noted'); }
+  },
+  mission_finish: {
+    description: 'End the mission. It is marked VERIFIED only if every success criterion passed a browser check; otherwise UNVERIFIED (or FAILED if you gave up). Returns the evidence report.',
+    schema: { summary: { type: 'string' }, gave_up: { type: 'boolean' } }, required: ['summary'],
+    run: async (a, client) => {
+      const m = missions.get(activeMission.get(client)); if (!m || m.status !== 'running') throw new Error('No running mission.');
+      m.summary = String(a.summary).slice(0, 3000); m.endedAt = Date.now();
+      const allPassed = m.criteria.every(c => c.status === 'passed');
+      m.status = a.gave_up ? 'failed' : allPassed ? 'verified' : 'unverified';
+      activeMission.delete(client); saveMission(m, true);
+      return text(missionSummary(m));
+    }
+  },
+  mission_report: {
+    description: 'Get a mission record (the current or last mission, or one by id) — goal, criteria with evidence, actions and results.',
+    schema: { id: { type: 'string' }, include_steps: { type: 'boolean' } },
+    run: async (a, client) => {
+      const id = a.id || activeMission.get(client) || [...missions.values()].filter(x => x.client === client).sort((x, y) => y.startedAt - x.startedAt).map(x => x.id)[0];
+      const m = missions.get(id); if (!m) throw new Error('No mission found');
+      const r = missionSummary(m);
+      if (a.include_steps) r.steps = m.steps.map(s => ({ n: s.n, tool: s.tool, summary: s.summary, ok: s.ok, error: s.error, warning: s.warning, url: s.after && s.after.url }));
+      return text(r);
+    }
+  }
+});
+const MISSION_TOOLS = new Set(['mission_start', 'mission_verify', 'mission_note', 'mission_finish', 'mission_report']);
+function listMissions() { return [...missions.values()].sort((a, b) => b.startedAt - a.startedAt).map(m => ({ ...missionSummary(m), steps: m.steps.length })); }
+function getMission(id) { return missions.get(id) || null; }
+function deleteMission(id) {
+  const m = missions.get(id); if (!m) return false;
+  for (const f of fs.readdirSync(missionsDir)) if (f.startsWith(id)) { try { fs.unlinkSync(path.join(missionsDir, f)); } catch {} }
+  missions.delete(id); notify({ type: 'mission', id, status: 'deleted' }); return true;
+}
 
 function toolList() {
   return Object.entries(TOOLS).map(([name, t]) => ({
@@ -485,13 +654,13 @@ function prompt(key, op, args) {
 }
 function waitShort(p) { return Promise.race([p, new Promise(r => setTimeout(() => r(WAITING), TOOL_WAIT))]); }
 const approvals = new Map();   // client -> { plan, t }
-const NO_APPROVAL_NEEDED = new Set(['list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
+const NO_APPROVAL_NEEDED = new Set(['mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
 function setApproved(client, plan) { approvals.set(client, { plan: plan || '', t: Date.now() }); notify({ type: 'approvals' }); }
 async function ensureApproved(client, name, args) {
-  if (cfg.mode === 'auto' || client === 'Orbit' || approvals.has(client) || NO_APPROVAL_NEEDED.has(name)) return;
+  if (cfg.mode === 'auto' || client === 'Orbit' || approvals.has(client) || isTrusted(client) || NO_APPROVAL_NEEDED.has(name)) return;
   const r = await waitShort(prompt(client + ':approve', 'approve', { client, plan: '', action: summarize(name, args || {}) }));
   if (r === WAITING) throw new Error('Waiting for the owner to press Allow in MiniNet Browser. Try this action again in a moment (the request is still showing).');
-  if (r && r.allow) { if (!approvals.has(client)) setApproved(client, '(approved from first action: ' + summarize(name, args || {}) + ')'); return; }
+  if (r && r.allow) { if (!approvals.has(client)) setApproved(client, '(approved from first action: ' + summarize(name, args || {}) + ')'); if (r.always) trust(client); return; }
   throw new Error('The browser owner did not allow ' + client + ' to control the browser.' + (r && r.reason ? ' They said: ' + r.reason : '') + ' Use request_permission to explain your plan, then wait for approval.');
 }
 
@@ -504,7 +673,10 @@ async function call(name, args = {}, client = 'AI agent') {
   log.unshift(entry); if (log.length > 200) log.pop();
   notify({ type: 'activity', ...entry, status: 'start' });
   try {
-    const r = await t.run(args || {}, client);
+    const mid = activeMission.get(client), m = mid && missions.get(mid);
+    let r;
+    if (m && m.status === 'running' && !MISSION_TOOLS.has(name)) { checkMissionLimits(m, name, args || {}); r = await recordStep(m, name, args || {}, () => t.run(args || {}, client)); }
+    else r = await t.run(args || {}, client);
     entry.ok = true; notify({ type: 'activity', ...entry, status: 'done' });
     return r;
   } catch (e) {
@@ -516,9 +688,30 @@ async function call(name, args = {}, client = 'AI agent') {
 /* ---------------- HTTP + MCP server ---------------- */
 const INSTRUCTIONS = `You are controlling MiniNet Browser, the user's own web browser, on their behalf.
 Before acting, call request_permission with a short plain-language plan. Once the owner approves, carry the plan out fully by yourself — sign up, log in, accept or reject cookies, press Continue, fill forms — without asking again. If something comes up that the plan didn't cover, use ask_user.
+For bigger jobs, start with mission_start (goal + success criteria), prove each criterion with mission_verify, and end with mission_finish — the owner sees a verified evidence record.
 Typical loop: snapshot -> click/type using the [ref] numbers or visible text -> snapshot again to check. If a click warns that a popup covered the target, close the popup first.
-Addresses ending in .mini (e.g. chirp.mini, minimart.mini, bank.mini, build.mini) are sites inside MiniNet, the user's own mini-internet.
+Addresses ending in .mini (home.mini, chirp.mini, talk.mini, people.mini) are MiniNet Chat — a small local social feed and chat rooms. Everything else is the real web.
 You can also create browser extensions with save_extension. You cannot change the browser's own code.`;
+
+// OpenAPI description so ChatGPT custom GPTs (Actions) and other tool-calling AIs can use the browser too
+let publicUrl = null;
+function setPublicUrl(u) { publicUrl = u || null; }
+const OPENAPI_SKIP = new Set(['mission_note', 'mission_report', 'get_extension', 'toggle_extension', 'delete_extension']);
+function openApi(token) {
+  const base = (publicUrl || `http://127.0.0.1:${cfg.port}`) + (token ? '/t/' + token : '');
+  const paths = {};
+  for (const t of toolList()) {
+    if (OPENAPI_SKIP.has(t.name)) continue;
+    paths['/api/tools/' + t.name] = { post: {
+      operationId: t.name, summary: t.name.replace(/_/g, ' '), description: t.description.slice(0, 300),
+      requestBody: { required: true, content: { 'application/json': { schema: t.inputSchema } } },
+      responses: { 200: { description: 'Result', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, content: { type: 'array', items: { type: 'object' } } } } } } } }
+    } };
+  }
+  return { openapi: '3.1.0', info: { title: 'MiniNet Browser', version: require('./package.json').version, description: INSTRUCTIONS.slice(0, 300) },
+    servers: [{ url: base }], paths,
+    components: { schemas: {}, securitySchemes: { bearer: { type: 'http', scheme: 'bearer' } } } };
+}
 
 function allowedHost(req) {
   const h = String(req.headers.host || '').toLowerCase();
@@ -601,6 +794,7 @@ async function onRequest(req, res) {
     return send(res, 200, Array.isArray(body) ? out : out[0], hdr);
   }
   if (url.pathname === '/api/tools' && req.method === 'GET') return send(res, 200, toolList());
+  if ((url.pathname === '/openapi.json' || url.pathname === '/openapi') && req.method === 'GET') return send(res, 200, openApi(url.searchParams.get('token')));
   const m = url.pathname.match(/^\/api\/tools\/([a-z_]+)$/);
   if (m && req.method === 'POST') {
     let args = {}; try { const b = await readBody(req); args = b ? JSON.parse(b) : {}; } catch { return send(res, 400, { error: 'Body must be JSON' }); }
@@ -623,7 +817,8 @@ function restart() { stop(); start(); }
 function init({ userData, shell, onEvent }) {
   shellReq = shell; notify = onEvent || notify;
   loadConfig(userData);
+  missionInit(userData);
   start();
 }
 
-module.exports = { init, call, toolList, getConfig, setConfig, setPaused, getLog: () => log.slice(0, 100), INSTRUCTIONS, displayUrl };
+module.exports = { init, listMissions, getMission, deleteMission, missionsDir: () => missionsDir, call, toolList, getConfig, setConfig, setPaused, getLog: () => log.slice(0, 100), INSTRUCTIONS, displayUrl, setPublicUrl };

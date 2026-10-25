@@ -14,7 +14,7 @@ const settings = Object.assign({
   adblock: true, datasaver: false, bookbar: true, sidebar: true
 }, load('settings', {}));
 let bookmarks = load('bookmarks', [
-  { url: 'mini://home.mini', title: 'MiniNet' },
+  { url: 'mini://home.mini', title: 'MiniNet Chat' },
   { url: 'https://www.google.com/', title: 'Google' },
   { url: 'https://www.youtube.com/', title: 'YouTube' },
   { url: 'https://web.whatsapp.com/', title: 'WhatsApp' },
@@ -251,7 +251,7 @@ function renderBookbar() {
 /* ---------------- sidebar ---------------- */
 function renderSide() {
   const box = $('#sideSites');
-  box.innerHTML = `<button class="sb minibtn" data-url="mini://home.mini" title="MiniNet — your own tiny internet"><img src="icon.png"></button>` +
+  box.innerHTML = `<button class="sb minibtn" data-url="mini://home.mini" title="MiniNet Chat"><img src="icon.png"></button>` +
     sideSites.map((s, i) => `<button class="sb" data-url="${esc(s.url)}" data-i="${i}" title="${esc(s.title)} (right-click to remove)"><img src="${esc(favicon(s.url))}"></button>`).join('') +
     `<button class="sb add" title="Add current site to sidebar"><svg viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></svg></button>`;
   box.querySelectorAll('.sb[data-url]').forEach(el => {
@@ -358,7 +358,7 @@ function showPanel(name) {
       <div class="set"><b>Search engine</b><select class="inp" id="sEngine">${Object.entries(ENGINES).map(([k, e]) => `<option value="${k}" ${settings.engine === k ? 'selected' : ''}>${e.name}</option>`).join('')}</select></div>
       <div class="set"><b>Home button opens</b><select class="inp" id="sHome">
         <option value="start" ${settings.home === 'start' ? 'selected' : ''}>Start page</option>
-        <option value="mininet" ${settings.home === 'mininet' ? 'selected' : ''}>MiniNet (mini://home.mini)</option>
+        <option value="mininet" ${settings.home === 'mininet' ? 'selected' : ''}>MiniNet Chat (mini://home.mini)</option>
         <option value="custom" ${settings.home === 'custom' ? 'selected' : ''}>A website…</option></select>
         <input class="inp" id="sHomeUrl" placeholder="e.g. google.com" value="${esc(settings.homeUrl)}" style="display:${settings.home === 'custom' ? 'block' : 'none'}"></div>
       <div class="set"><b>When the browser opens</b><select class="inp" id="sStartup">
@@ -429,7 +429,7 @@ function openMenu() {
   const items = [
     ['New tab', 'Ctrl+T', () => newTab()],
     ['Reopen closed tab', 'Ctrl+Shift+T', reopen],
-    ['Open MiniNet', '', () => openSide('mini://home.mini')],
+    ['Open MiniNet Chat', '', () => openSide('mini://home.mini')],
     '-', ['zoom'], '-',
     ['Find in page', 'Ctrl+F', openFind],
     ['Print…', 'Ctrl+P', () => active && active.wv.print()],

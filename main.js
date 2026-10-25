@@ -238,61 +238,136 @@ ipcMain.handle('connect-claude-desktop', async () => {
   return { file };
 });
 
-/* ---------------- Public connector link (Cloudflare quick tunnel) ---------------- */
-const { spawn } = require('child_process');
+/* ---------------- Public connector link (ngrok permanent link, or Cloudflare quick link) ---------------- */
+const { spawn, execFile } = require('child_process');
 const tunnel = { proc: null, url: null, status: 'off', error: null, progress: 0 };
-function tunnelEmit() { win && win.webContents.send('tunnel', { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress }); }
-function cloudflaredPath() {
-  const name = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
-  return path.join(app.getPath('userData'), 'bin', name);
+function tunnelFile() { return path.join(app.getPath('userData'), 'tunnel.json'); }
+function tunnelConf(patch) {
+  let c = { on: false, provider: 'ngrok', domain: '' };
+  try { c = Object.assign(c, JSON.parse(fs.readFileSync(tunnelFile(), 'utf8'))); } catch {}
+  if (patch) { c = Object.assign(c, patch); fs.writeFileSync(tunnelFile(), JSON.stringify(c)); }
+  return c;
 }
-async function ensureCloudflared() {
-  const exe = cloudflaredPath();
-  if (fs.existsSync(exe) && fs.statSync(exe).size > 1e6) return exe;
-  const asset = process.platform === 'win32' ? 'cloudflared-windows-amd64.exe' : process.platform === 'darwin' ? 'cloudflared-darwin-amd64.tgz' : 'cloudflared-linux-amd64';
-  if (asset.endsWith('.tgz')) throw new Error('On Mac, install cloudflared with "brew install cloudflared" first.');
+function tunnelState() { const c = tunnelConf(); return { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress, provider: c.provider, domain: c.domain, hasNgrokKey: !!readSecrets().ngrok }; }
+function tunnelEmit() { agent.setPublicUrl(tunnel.status === 'on' ? tunnel.url : null); win && !win.isDestroyed() && win.webContents.send('tunnel', tunnelState()); }
+function binPath(name) { return path.join(app.getPath('userData'), 'bin', process.platform === 'win32' ? name + '.exe' : name); }
+async function downloadTo(url, file) {
   tunnel.status = 'downloading'; tunnel.progress = 0; tunnelEmit();
-  const r = await fetch('https://github.com/cloudflare/cloudflared/releases/latest/download/' + asset);
+  const r = await fetch(url);
   if (!r.ok) throw new Error('Could not download the tunnel tool (HTTP ' + r.status + ')');
   const total = +r.headers.get('content-length') || 0;
-  fs.mkdirSync(path.dirname(exe), { recursive: true });
-  const tmp = exe + '.part'; const out = fs.createWriteStream(tmp);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.part'; const out = fs.createWriteStream(tmp);
   let got = 0, last = 0;
   for await (const chunk of r.body) {
     out.write(chunk); got += chunk.length;
     if (total && Date.now() - last > 400) { tunnel.progress = Math.round(got / total * 100); tunnelEmit(); last = Date.now(); }
   }
   await new Promise(ok => out.end(ok));
-  fs.renameSync(tmp, exe);
+  fs.renameSync(tmp, file);
+}
+async function ensureCloudflared() {
+  const exe = binPath('cloudflared');
+  if (fs.existsSync(exe) && fs.statSync(exe).size > 1e6) return exe;
+  const asset = process.platform === 'win32' ? 'cloudflared-windows-amd64.exe' : process.platform === 'darwin' ? null : 'cloudflared-linux-amd64';
+  if (!asset) throw new Error('On Mac, install cloudflared with "brew install cloudflared" first.');
+  await downloadTo('https://github.com/cloudflare/cloudflared/releases/latest/download/' + asset, exe);
   if (process.platform !== 'win32') fs.chmodSync(exe, 0o755);
   return exe;
 }
+async function ensureNgrok() {
+  const exe = binPath('ngrok');
+  if (fs.existsSync(exe) && fs.statSync(exe).size > 1e6) return exe;
+  const plat = process.platform === 'win32' ? 'windows-amd64.zip' : process.platform === 'darwin' ? 'darwin-arm64.zip' : 'linux-amd64.tgz';
+  const arch = path.join(path.dirname(exe), 'ngrok-dl.' + (plat.endsWith('zip') ? 'zip' : 'tgz'));
+  await downloadTo('https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-' + plat, arch);
+  tunnel.status = 'starting'; tunnelEmit();
+  await new Promise((ok, bad) => {
+    const done = err => err ? bad(new Error('Could not unpack ngrok: ' + err.message)) : ok();
+    if (process.platform === 'win32') execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -Force -LiteralPath '${arch}' -DestinationPath '${path.dirname(exe)}'`], { windowsHide: true }, done);
+    else if (arch.endsWith('.zip')) execFile('unzip', ['-o', arch, '-d', path.dirname(exe)], done);
+    else execFile('tar', ['-xzf', arch, '-C', path.dirname(exe)], done);
+  });
+  try { fs.unlinkSync(arch); } catch {}
+  if (!fs.existsSync(exe)) throw new Error('ngrok did not unpack correctly.');
+  if (process.platform !== 'win32') fs.chmodSync(exe, 0o755);
+  return exe;
+}
+function cleanDomain(d) { return String(d || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase(); }
 async function tunnelStart() {
   if (tunnel.proc) return;
   tunnel.error = null; tunnel.url = null;
+  const conf = tunnelConf();
+  const port = agent.getConfig().port;
   try {
-    const exe = await ensureCloudflared();
-    const port = agent.getConfig().port;
-    tunnel.status = 'starting'; tunnelEmit();
-    const p = spawn(exe, ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${port}`, '--http-host-header', `127.0.0.1:${port}`], { windowsHide: true });
+    let p;
+    if (conf.provider === 'ngrok') {
+      const key = readSecrets().ngrok;
+      if (!key) throw new Error('Paste your free ngrok authtoken first.');
+      const exe = await ensureNgrok();
+      tunnel.status = 'starting'; tunnelEmit();
+      const args = ['http', `127.0.0.1:${port}`, '--host-header=rewrite', '--log=stdout', '--log-format=json'];
+      const dom = cleanDomain(conf.domain);
+      if (dom) args.push('--url=https://' + dom);
+      p = spawn(exe, args, { windowsHide: true, env: Object.assign({}, process.env, { NGROK_AUTHTOKEN: key }) });
+      let buf = '';
+      const onData = d => {
+        buf += String(d); const lines = buf.split('\n'); buf = lines.pop();
+        for (const line of lines) {
+          let j; try { j = JSON.parse(line); } catch { continue; }
+          if (j.url && /^https:/.test(j.url) && !tunnel.url) { tunnel.url = j.url.replace(/\/$/, ''); tunnel.status = 'on'; if (!dom) tunnelConf({ domain: cleanDomain(tunnel.url) }); tunnelEmit(); }
+          if (j.lvl === 'eror' || j.lvl === 'crit') { tunnel.error = String(j.err || j.msg || 'ngrok error').replace(/\s+/g, ' ').slice(0, 300); tunnelEmit(); }
+        }
+      };
+      p.stdout.on('data', onData); p.stderr.on('data', onData);
+    } else {
+      const exe = await ensureCloudflared();
+      tunnel.status = 'starting'; tunnelEmit();
+      p = spawn(exe, ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${port}`, '--http-host-header', `127.0.0.1:${port}`], { windowsHide: true });
+      const onData = d => {
+        const m = String(d).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+        if (m && !tunnel.url) { tunnel.url = m[0]; tunnel.status = 'on'; tunnelEmit(); }
+      };
+      p.stdout.on('data', onData); p.stderr.on('data', onData);
+    }
     tunnel.proc = p;
-    const onData = d => {
-      const m = String(d).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-      if (m && !tunnel.url) { tunnel.url = m[0]; tunnel.status = 'on'; tunnelEmit(); }
-    };
-    p.stdout.on('data', onData); p.stderr.on('data', onData);
-    p.on('exit', code => { tunnel.proc = null; if (tunnel.status !== 'off') { tunnel.status = 'off'; tunnel.url = null; if (code) tunnel.error = 'The tunnel stopped (code ' + code + ').'; } tunnelEmit(); });
-    setTimeout(() => { if (tunnel.proc && !tunnel.url) { tunnel.error = 'The tunnel is taking long to start — check your internet connection.'; tunnelEmit(); } }, 30000);
+    p.on('error', err => { tunnel.error = err.message; });
+    p.on('exit', code => {
+      if (tunnel.proc !== p) return;
+      tunnel.proc = null;
+      if (tunnel.status !== 'off') {
+        tunnel.status = 'off'; tunnel.url = null;
+        if (code && !tunnel.error) tunnel.error = 'The link stopped (code ' + code + ').';
+        if (tunnelConf().on && !tunnel.restarts) { tunnel.restarts = 1; setTimeout(() => { tunnel.restarts = 0; if (tunnelConf().on && !tunnel.proc) tunnelStart(); }, 15000); }
+      }
+      tunnelEmit();
+    });
+    setTimeout(() => { if (tunnel.proc === p && !tunnel.url && !tunnel.error) { tunnel.error = 'The link is taking long to start — check your internet connection.'; tunnelEmit(); } }, 30000);
   } catch (e) { tunnel.status = 'off'; tunnel.error = e.message; tunnelEmit(); }
 }
-function tunnelPref(v) { const f = path.join(app.getPath('userData'), 'tunnel.json'); if (v === undefined) { try { return JSON.parse(fs.readFileSync(f, 'utf8')).on; } catch { return false; } } fs.writeFileSync(f, JSON.stringify({ on: !!v })); }
-function tunnelStop() { tunnel.status = 'off'; tunnel.url = null; if (tunnel.proc) { tunnel.proc.kill(); tunnel.proc = null; } tunnelEmit(); }
-ipcMain.handle('tunnel', async (e, op) => {
-  if (op === 'start') { tunnelPref(true); tunnelStart(); }
-  if (op === 'stop') { tunnelPref(false); tunnelStop(); }
-  return { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress };
+function tunnelStop() { tunnel.status = 'off'; tunnel.url = null; const p = tunnel.proc; tunnel.proc = null; if (p) p.kill(); tunnelEmit(); }
+ipcMain.handle('tunnel', async (e, op, opts = {}) => {
+  if (op === 'start') { tunnelConf({ on: true }); tunnelStart(); }
+  if (op === 'stop') { tunnelConf({ on: false }); tunnelStop(); }
+  if (op === 'setup') {
+    const patch = {};
+    if (opts.provider === 'ngrok' || opts.provider === 'cloudflare') patch.provider = opts.provider;
+    if (opts.domain !== undefined) patch.domain = cleanDomain(opts.domain);
+    if (opts.ngrokKey !== undefined) { const s = readSecrets(); if (opts.ngrokKey) s.ngrok = String(opts.ngrokKey).trim(); else delete s.ngrok; writeSecrets(s); }
+    const was = tunnelConf(); tunnelConf(patch);
+    if (tunnel.proc && (patch.provider && patch.provider !== was.provider || patch.domain !== undefined || opts.ngrokKey)) { tunnelStop(); tunnelConf({ on: true }); tunnelStart(); }
+  }
+  return tunnelState();
 });
-app.on('before-quit', () => { const keep = tunnelPref(); tunnelStop(); tunnelPref(keep); });
+app.on('before-quit', () => { const p = tunnel.proc; tunnel.proc = null; if (p) p.kill(); });
+
+/* ---------------- IPC: missions ---------------- */
+ipcMain.handle('missions', (e, { op, id }) => {
+  if (op === 'list') return agent.listMissions();
+  if (op === 'get') { const m = agent.getMission(id); return m && { ...m, dir: require('url').pathToFileURL(agent.missionsDir()).href }; }
+  if (op === 'delete') return agent.deleteMission(id);
+  if (op === 'folder') { shell.openPath(agent.missionsDir()); return true; }
+});
 
 /* ---------------- IPC: extensions ---------------- */
 ipcMain.handle('ext', async (e, { op, id, enabled, data }) => {
@@ -363,6 +438,6 @@ app.whenReady().then(() => {
     shell: shellReq,
     onEvent: ev => win && win.webContents.send('agent-event', ev)
   });
-  if (tunnelPref()) setTimeout(tunnelStart, 3000);   // reopen the connector link if it was on
+  if (tunnelConf().on) setTimeout(tunnelStart, 3000);   // reopen the connector link if it was on
 });
 app.on('window-all-closed', () => app.quit());
