@@ -1,14 +1,14 @@
 {
   "name": "mininet-browser",
   "productName": "MiniNet Browser",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "MiniNet Browser \u2014 the browser any AI can use as its eyes and hands.",
   "main": "main.js",
   "author": "Seyi",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "electron-packager . MiniNetBrowser --platform=win32 --arch=x64 --icon=icon.ico --out=dist --overwrite --asar --ignore=^/dist --ignore=^/docs --ignore=^/\\.github --ignore=^/test --ignore=^/\\.ezip"
+    "build": "electron-packager . MiniNetBrowser --platform=win32 --arch=x64 --icon=icon.ico --out=dist --overwrite --asar --ignore=^/dist --ignore=^/docs --ignore=^/\\.github --ignore=^/test --ignore=^/\\.ezip --ignore=^/test[0-9a-z-]*\\.js --ignore=^/shots\\.js"
   },
   "devDependencies": {
     "electron": "38.8.6",

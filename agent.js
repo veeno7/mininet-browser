@@ -6,7 +6,7 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { webContents } = require('electron');
+const { webContents, nativeImage } = require('electron');
 const ext = require('./extensions');
 
 let cfg = { enabled: true, port: 7811, token: '', mode: 'ask', trusted: [] };
@@ -211,11 +211,11 @@ function checkNavUrl(u) {
 }
 
 /* ---------------- tools ---------------- */
-const TAB = { tab: { type: 'integer', description: 'Tab id from list_tabs. Leave out to use the active tab.' } };
+const TAB = { tab: { type: 'integer', description: 'Tab id from list_tabs. Leave out to use your own tab (the active tab, or a tab of your own if another AI is busy there).' } };
 const TOOLS = {
   list_tabs: {
     description: 'List open tabs with their ids, titles and addresses. The active tab is marked.',
-    schema: {}, run: async () => text((await shellReq('list')).map(t => ({ id: t.id, active: t.active, title: t.title, url: displayUrl(t.url), loading: t.loading })))
+    schema: {}, run: async () => text((await shellReq('list')).map(t => { const o = busyOwnerOf(t.id); return { id: t.id, active: t.active, title: t.title, url: displayUrl(t.url), loading: t.loading, ...(o ? { ai_working_here: o.client } : {}) }; }))
   },
   open_tab: {
     description: 'Open a new tab. Accepts a web address (example.com), a search phrase, or a MiniNet Chat address (chirp.mini / talk.mini). Returns the new tab id.',
@@ -245,7 +245,7 @@ const TOOLS = {
   reload: { description: 'Reload a tab.', schema: { ...TAB }, run: async a => { const { wc } = await tabWC(a.tab); wc.reload(); await waitLoad(wc); return text('reloaded'); } },
   switch_tab: { description: 'Make a tab the active (visible) tab.', schema: { tab: { type: 'integer' } }, required: ['tab'], run: async a => { await shellReq('activate', { id: +a.tab }); return text('ok'); } },
   close_other_tabs: { description: 'Close every tab except one (the active tab unless you give keep).', schema: { keep: { type: 'integer', description: 'Tab id to keep' } },
-    run: async a => { const tabs = await shellReq('list'); const keep = a.keep != null ? +a.keep : (tabs.find(t => t.active) || tabs[0]).id; let n = 0; for (const t of tabs) if (t.id !== keep) { await shellReq('close', { id: t.id }); n++; } await shellReq('activate', { id: keep }); return text(`closed ${n} tabs, kept tab ${keep}`); } },
+    run: async a => { const tabs = await shellReq('list'); const keep = a.keep != null ? +a.keep : (tabs.find(t => t.active) || tabs[0]).id; let n = 0; let spared = 0; for (const t of tabs) if (t.id !== keep) { if (busyOwnerOf(t.id)) { spared++; continue; } await shellReq('close', { id: t.id }); n++; } await shellReq('activate', { id: keep }); return text(`closed ${n} tabs, kept tab ${keep}` + (spared ? ` (left ${spared} tab(s) other AIs are working in)` : '')); } },
   close_tab: { description: 'Close a tab.', schema: { tab: { type: 'integer' } }, required: ['tab'], run: async a => { await shellReq('close', { id: +a.tab }); return text('closed'); } },
 
   snapshot: {
@@ -375,6 +375,7 @@ const TOOLS = {
     run: async a => {
       const { wc } = await tabWC(a.tab);
       let img = await wc.capturePage();
+      if (img.isEmpty() || !img.getSize().width) { await shellReq('peek', { id: (await tabWC(a.tab)).tab.id }).catch(() => {}); await sleep(600); img = await wc.capturePage(); }
       // resize to the page's own pixel grid so x/y read from the picture work directly with click/hover
       const vw = await js(wc, 'innerWidth').catch(() => 0);
       const cssW = vw ? Math.round(vw * wc.getZoomFactor()) : img.getSize().width;
@@ -626,6 +627,31 @@ function deleteMission(id) {
   missions.delete(id); notify({ type: 'mission', id, status: 'deleted' }); return true;
 }
 
+/* ---------------- helper agents: an AI can start more AIs, each in its own tab ---------------- */
+Object.assign(TOOLS, {
+  start_helper: {
+    description: 'Start a helper AI agent that works on its own task in its own tab, at the same time as you (uses the AI model chosen in Orbit settings — can be a free local Ollama model). Use it to split a big job into parallel parts, e.g. one helper checks Instagram messages while another researches prices. Returns at once; use check_helpers to follow progress and read each helper\'s final report.',
+    schema: { task: { type: 'string', description: 'Clear, self-contained instructions for the helper, including what to report back' }, url: { type: 'string', description: 'Optional address to start at' } },
+    required: ['task'],
+    run: async (a, client) => text(await shellReq('helper', { op: 'start', task: String(a.task), url: a.url || '', by: client }))
+  },
+  check_helpers: {
+    description: 'See every helper agent: its task, status (running/done/failed/stopped), its tab, how many steps it took and its final report. Set wait_seconds to wait until all running helpers finish (max 300).',
+    schema: { wait_seconds: { type: 'integer' } },
+    run: async a => {
+      const until = Date.now() + Math.min(300, Math.max(0, +a.wait_seconds || 0)) * 1000;
+      let list = await shellReq('helper', { op: 'list' });
+      while (Date.now() < until && list.some(h => h.status === 'running')) { await sleep(2000); list = await shellReq('helper', { op: 'list' }); }
+      return text(list.length ? list : 'No helpers yet. Start one with start_helper.');
+    }
+  },
+  stop_helper: {
+    description: 'Stop a helper agent by name (e.g. "Orbit · Helper 2"), or all helpers with name "all".',
+    schema: { name: { type: 'string' } }, required: ['name'],
+    run: async a => text(await shellReq('helper', { op: 'stop', name: String(a.name) }))
+  }
+});
+
 function toolList() {
   return Object.entries(TOOLS).map(([name, t]) => ({
     name, description: t.description,
@@ -654,21 +680,64 @@ function prompt(key, op, args) {
 }
 function waitShort(p) { return Promise.race([p, new Promise(r => setTimeout(() => r(WAITING), TOOL_WAIT))]); }
 const approvals = new Map();   // client -> { plan, t }
-const NO_APPROVAL_NEEDED = new Set(['mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
+const NO_APPROVAL_NEEDED = new Set(['check_helpers', 'mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
 function setApproved(client, plan) { approvals.set(client, { plan: plan || '', t: Date.now() }); notify({ type: 'approvals' }); }
 async function ensureApproved(client, name, args) {
-  if (cfg.mode === 'auto' || client === 'Orbit' || approvals.has(client) || isTrusted(client) || NO_APPROVAL_NEEDED.has(name)) return;
+  if (cfg.mode === 'auto' || client === 'Orbit' || /^Orbit · Helper \d+$/.test(client) || approvals.has(client) || isTrusted(client) || NO_APPROVAL_NEEDED.has(name)) return;
   const r = await waitShort(prompt(client + ':approve', 'approve', { client, plan: '', action: summarize(name, args || {}) }));
   if (r === WAITING) throw new Error('Waiting for the owner to press Allow in MiniNet Browser. Try this action again in a moment (the request is still showing).');
   if (r && r.allow) { if (!approvals.has(client)) setApproved(client, '(approved from first action: ' + summarize(name, args || {}) + ')'); if (r.always) trust(client); return; }
   throw new Error('The browser owner did not allow ' + client + ' to control the browser.' + (r && r.reason ? ' They said: ' + r.reason : '') + ' Use request_permission to explain your plan, then wait for approval.');
 }
 
-async function call(name, args = {}, client = 'AI agent') {
+/* ---------------- many AIs at once: each AI (and each helper agent) works in its own tab ---------------- */
+const owners = new Map();            // owner key -> { tab, client, at, color }
+const IDLE_MS = 3 * 60 * 1000;       // an AI that has been quiet this long gives its tab back
+const AGENT_COLORS = ['#2dd4bf', '#f59e0b', '#a78bfa', '#f472b6', '#60a5fa', '#34d399', '#fb7185', '#facc15'];
+let colorSeq = 0;
+function busyOwnerOf(tabId, exceptKey) { for (const [k, o] of owners) if (k !== exceptKey && o.tab === tabId && Date.now() - o.at < IDLE_MS) return { key: k, ...o }; return null; }
+function anotherBusy(key) { for (const [k, o] of owners) if (k !== key && Date.now() - o.at < 60000) return true; return false; }
+function claim(key, client, tabId) {
+  let o = owners.get(key);
+  if (!o) { o = { color: AGENT_COLORS[colorSeq++ % AGENT_COLORS.length] }; owners.set(key, o); }
+  const moved = o.tab !== tabId;
+  Object.assign(o, { tab: tabId, client, at: Date.now() });
+  if (moved || !o.shown) { o.shown = true; shellReq('owner', { id: tabId, name: client, color: o.color }).catch(() => {}); }
+  return o;
+}
+function release(key) {
+  const o = owners.get(key); if (!o) return;
+  owners.delete(key);
+  if (![...owners.values()].some(x => x.tab === o.tab)) shellReq('owner', { id: o.tab, name: null }).catch(() => {});
+}
+setInterval(() => { for (const [k, o] of owners) if (Date.now() - o.at > IDLE_MS) release(k); }, 20000).unref?.();
+async function ownTab(key, client) {
+  const tabs = await shellReq('list');
+  const mine = owners.get(key);
+  if (mine && Date.now() - mine.at < IDLE_MS && tabs.some(t => t.id === mine.tab)) { claim(key, client, mine.tab); return { id: mine.tab }; }
+  const act = tabs.find(t => t.active);
+  const other = act && busyOwnerOf(act.id, key);
+  if (act && !other) { claim(key, client, act.id); return { id: act.id }; }
+  const t = await shellReq('open', { url: '', background: true });
+  claim(key, client, t.id);
+  return { id: t.id, note: `${other ? other.client + ' is working in tab ' + other.tab : 'Another AI is busy'}, so you were given your own tab ${t.id} (in the background). Keep using it — pass tab ids to work in several tabs at once.` };
+}
+const TAB_TOOLS = new Set(Object.entries(TOOLS).filter(([n, t]) => t.schema && t.schema.tab && !['switch_tab', 'close_tab'].includes(n)).map(([n]) => n));
+function agentsSummary() { return [...owners.entries()].filter(([, o]) => Date.now() - o.at < IDLE_MS).map(([k, o]) => ({ agent: o.client, tab: o.tab, last_action_seconds_ago: Math.round((Date.now() - o.at) / 1000) })); }
+
+async function call(name, args = {}, client = 'AI agent', ownerKey) {
   if (paused) throw new Error('The user has paused AI control of MiniNet Browser. Ask them to press Resume.');
   const t = TOOLS[name];
   if (!t) throw new Error(`Unknown tool ${name}`);
   await ensureApproved(client, name, args);
+  const key = ownerKey || client;
+  args = Object.assign({}, args);
+  let note = '';
+  if (TAB_TOOLS.has(name)) {
+    if (args.tab == null) { const r = await ownTab(key, client); args.tab = r.id; note = r.note || ''; }
+    else claim(key, client, +args.tab);
+  }
+  if (name === 'open_tab' && args.background == null && anotherBusy(key)) args.background = true;
   const entry = { t: Date.now(), client, tool: name, summary: summarize(name, args || {}), ok: null };
   log.unshift(entry); if (log.length > 200) log.pop();
   notify({ type: 'activity', ...entry, status: 'start' });
@@ -677,6 +746,9 @@ async function call(name, args = {}, client = 'AI agent') {
     let r;
     if (m && m.status === 'running' && !MISSION_TOOLS.has(name)) { checkMissionLimits(m, name, args || {}); r = await recordStep(m, name, args || {}, () => t.run(args || {}, client)); }
     else r = await t.run(args || {}, client);
+    if (name === 'open_tab') { try { const id = JSON.parse(r.content[0].text).opened; if (id) claim(key, client, id); } catch {} }
+    if (name === 'switch_tab') claim(key, client, +args.tab);
+    if (note && r && r.content) r = { ...r, content: [...r.content, { type: 'text', text: 'Note: ' + note }] };
     entry.ok = true; notify({ type: 'activity', ...entry, status: 'done' });
     return r;
   } catch (e) {
@@ -691,12 +763,14 @@ Before acting, call request_permission with a short plain-language plan. Once th
 For bigger jobs, start with mission_start (goal + success criteria), prove each criterion with mission_verify, and end with mission_finish — the owner sees a verified evidence record.
 Typical loop: snapshot -> click/type using the [ref] numbers or visible text -> snapshot again to check. If a click warns that a popup covered the target, close the popup first.
 Addresses ending in .mini (home.mini, chirp.mini, talk.mini, people.mini) are MiniNet Chat — a small local social feed and chat rooms. Everything else is the real web.
+Many AIs can work in this browser at the same time. Each AI gets its own tab: if another AI is busy in the tab you would use, you are given a new one automatically (list_tabs shows who works where). To do several jobs at once yourself, open several tabs and pass each tab id — tool calls on different tabs can run in parallel, so you can act as a team of agents.
+If the owner has to sign in somewhere (a password, a code from their phone), use ask_user to let them sign in, then carry on in that signed-in tab.
 You can also create browser extensions with save_extension. You cannot change the browser's own code.`;
 
 // OpenAPI description so ChatGPT custom GPTs (Actions) and other tool-calling AIs can use the browser too
 let publicUrl = null;
 function setPublicUrl(u) { publicUrl = u || null; }
-const OPENAPI_SKIP = new Set(['mission_note', 'mission_report', 'get_extension', 'toggle_extension', 'delete_extension']);
+const OPENAPI_SKIP = new Set(['mission_note', 'mission_report', 'get_extension', 'toggle_extension', 'delete_extension', 'hover', 'go_forward', 'stop_helper']);  // ChatGPT Actions allow 30
 function openApi(token) {
   const base = (publicUrl || `http://127.0.0.1:${cfg.port}`) + (token ? '/t/' + token : '');
   const paths = {};
@@ -747,7 +821,7 @@ async function handleRpc(msg, sessionKey) {
   if (method === 'ping') return ok({});
   if (method === 'tools/list') return ok({ tools: toolList() });
   if (method === 'tools/call') {
-    try { return ok(await call(params.name, params.arguments || {}, clientNames.get(sessionKey) || clientNames.get('default') || 'AI agent')); }
+    try { return ok(await call(params.name, params.arguments || {}, clientNames.get(sessionKey) || clientNames.get('default') || 'AI agent', 'mcp:' + sessionKey)); }
     catch (e) { return ok({ content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true }); }
   }
   if (method === 'resources/list') return ok({ resources: [] });
@@ -798,7 +872,7 @@ async function onRequest(req, res) {
   const m = url.pathname.match(/^\/api\/tools\/([a-z_]+)$/);
   if (m && req.method === 'POST') {
     let args = {}; try { const b = await readBody(req); args = b ? JSON.parse(b) : {}; } catch { return send(res, 400, { error: 'Body must be JSON' }); }
-    try { return send(res, 200, { ok: true, ...(await call(m[1], args, outsideName(req.headers['x-agent-name'] || 'API client'))) }); }
+    try { return send(res, 200, { ok: true, ...(await call(m[1], args, outsideName(req.headers['x-agent-name'] || 'API client'), req.headers['x-agent-id'] ? 'api:' + String(req.headers['x-agent-id']).slice(0, 80) : undefined)) }); }
     catch (e) { return send(res, 400, { ok: false, error: e.message }); }
   }
   if (url.pathname === '/api/log') return send(res, 200, log.slice(0, 50));
@@ -821,4 +895,4 @@ function init({ userData, shell, onEvent }) {
   start();
 }
 
-module.exports = { init, listMissions, getMission, deleteMission, missionsDir: () => missionsDir, call, toolList, getConfig, setConfig, setPaused, getLog: () => log.slice(0, 100), INSTRUCTIONS, displayUrl, setPublicUrl };
+module.exports = { init, listMissions, getMission, deleteMission, missionsDir: () => missionsDir, call, toolList, getConfig, setConfig, setPaused, getLog: () => log.slice(0, 100), INSTRUCTIONS, displayUrl, setPublicUrl, release, agentsSummary };

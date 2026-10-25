@@ -198,14 +198,15 @@ ipcMain.on('copy', (e, t) => clipboard.writeText(String(t)));
 
 /* ---------------- IPC: AI control ---------------- */
 ipcMain.handle('agent-tools', () => agent.toolList());
-ipcMain.handle('agent-call', async (e, { name, args, client }) => {
-  try { return { ok: true, result: await agent.call(name, args, client || 'Orbit') }; }
+ipcMain.handle('agent-call', async (e, { name, args, client, owner }) => {
+  try { return { ok: true, result: await agent.call(name, args, client || 'Orbit', owner) }; }
   catch (err) { return { ok: false, error: err.message }; }
 });
 ipcMain.handle('agent-config', (e, c) => c ? agent.setConfig(c) : agent.getConfig());
 ipcMain.handle('agent-log', () => agent.getLog());
 ipcMain.on('agent-pause', (e, p) => agent.setPaused(p));
 ipcMain.handle('agent-instructions', () => agent.INSTRUCTIONS);
+ipcMain.handle('agent-release', (e, key) => agent.release(key));
 
 function bridgePath() { return path.join(app.getPath('userData'), 'mcp-bridge.js'); }
 function writeBridge() {

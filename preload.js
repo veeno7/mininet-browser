@@ -12,7 +12,8 @@ contextBridge.exposeInMainWorld('app', {
   // AI control
   agentRespond: (msg) => ipcRenderer.send('agent-res', msg),
   agentTools: () => ipcRenderer.invoke('agent-tools'),
-  agentCall: (name, args, client) => ipcRenderer.invoke('agent-call', { name, args, client }),
+  agentCall: (name, args, client, owner) => ipcRenderer.invoke('agent-call', { name, args, client, owner }),
+  agentRelease: (key) => ipcRenderer.invoke('agent-release', key),
   agentConfig: (c) => ipcRenderer.invoke('agent-config', c),
   agentLog: () => ipcRenderer.invoke('agent-log'),
   agentPause: (p) => ipcRenderer.send('agent-pause', p),

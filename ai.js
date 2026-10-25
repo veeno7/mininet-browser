@@ -70,6 +70,12 @@ const PROVIDERS = {
   groq: { name: 'Groq (fast, free tier)', kind: 'openai', url: 'https://api.groq.com/openai/v1/chat/completions', model: 'llama-3.3-70b-versatile', key: true, vision: false, keyHelp: 'console.groq.com' },
   gemini: { name: 'Gemini (Google)', kind: 'openai', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', model: 'gemini-3.8-flash', key: true, vision: true, keyHelp: 'aistudio.google.com/apikey' },
   openrouter: { name: 'OpenRouter (hundreds of models)', kind: 'openai', url: 'https://openrouter.ai/api/v1/chat/completions', model: 'anthropic/claude-sonnet-4.5', key: true, vision: true, keyHelp: 'openrouter.ai' },
+  deepseek: { name: 'DeepSeek', kind: 'openai', url: 'https://api.deepseek.com/chat/completions', model: 'deepseek-flash', key: true, vision: false, keyHelp: 'platform.deepseek.com' },
+  kimi: { name: 'Kimi (Moonshot AI)', kind: 'openai', url: 'https://api.moonshot.ai/v1/chat/completions', model: 'kimi-k3', key: true, vision: false, keyHelp: 'platform.moonshot.ai' },
+  qwen: { name: 'Qwen (Alibaba Model Studio)', kind: 'openai', url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-plus', key: true, vision: false, keyHelp: 'modelstudio.console.alibabacloud.com' },
+  mistral: { name: 'Mistral', kind: 'openai', url: 'https://api.mistral.ai/v1/chat/completions', model: 'mistral-large-latest', key: true, vision: false, keyHelp: 'console.mistral.ai' },
+  xai: { name: 'Grok (xAI)', kind: 'openai', url: 'https://api.x.ai/v1/chat/completions', model: 'grok-4', key: true, vision: true, keyHelp: 'console.x.ai' },
+  lmstudio: { name: 'LM Studio (free, on this computer)', kind: 'openai', url: 'http://localhost:1234/v1/chat/completions', model: 'local-model', key: false, vision: false, keyHelp: 'lmstudio.ai' },
   ollama: { name: 'Ollama (free, runs on this computer)', kind: 'openai', url: 'http://localhost:11434/v1/chat/completions', model: 'qwen2.5:7b', key: false, vision: false, keyHelp: 'ollama.com' },
   custom: { name: 'Custom (OpenAI-compatible)', kind: 'openai', url: '', model: '', key: true, vision: false, keyHelp: '' }
 };
@@ -86,7 +92,7 @@ function orbitAbort() { abortFlag = true; }
 PANELS.orbit = { title: 'Orbit', wide: true, render: renderOrbit };
 function renderOrbit(body) {
   body.className = 'chat';
-  body.innerHTML = `<div id="oMsgs"></div>
+  body.innerHTML = `<div id="oTeam" style="display:none"></div><div id="oMsgs"></div>
     <div id="oInput">
       <textarea id="oText" rows="2" placeholder="Ask Orbit to do anything on the web…  (Enter to send)"></textarea>
       <div class="orow">
@@ -99,7 +105,7 @@ function renderOrbit(body) {
       </div>
     </div>`;
   $('#oModel').textContent = prov().name.split(' (')[0] + ' · ' + (modelName() || 'no model');
-  paintConvo();
+  paintConvo(); paintHelpers();
   const ta = $('#oText');
   ta.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendOrbit(); } };
   ta.oninput = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; };
@@ -165,7 +171,7 @@ ${orbit.instructions ? 'User\'s custom instructions: ' + orbit.instructions : ''
 async function getTools() { if (!toolDefs) toolDefs = await window.app.agentTools(); return toolDefs; }
 function contentText(content) { return (content || []).filter(c => c.type === 'text').map(c => c.text).join('\n'); }
 
-function toAnthropic(sys, tools) {
+function toAnthropic(sys, tools, convo) {
   const msgs = [];
   const toolRounds = convo.filter(m => m.role === 'tool').length;
   let roundIdx = 0;
@@ -190,7 +196,7 @@ function toAnthropic(sys, tools) {
   }
   return { model: modelName(), max_tokens: 4096, system: sys, tools: tools.map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema })), messages: msgs };
 }
-function toOpenAI(sys, tools) {
+function toOpenAI(sys, tools, convo) {
   const msgs = [{ role: 'system', content: sys }];
   const toolRounds = convo.filter(m => m.role === 'tool').length;
   let roundIdx = 0;
@@ -216,19 +222,20 @@ function toOpenAI(sys, tools) {
   return { model: modelName(), messages: msgs, tools: tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.inputSchema } })), tool_choice: 'auto' };
 }
 
-async function callModel() {
-  const p = prov(), tools = await getTools(), sys = await systemPrompt();
+async function callModel(cv = convo, sysExtra = '', exclude = null) {
+  const p = prov(), sys = (await systemPrompt()) + (sysExtra ? '\n' + sysExtra : '');
+  let tools = await getTools(); if (exclude) tools = tools.filter(t => !exclude.has(t.name));
   const url = provUrl();
   if (!url) throw new Error('Set the API address for the custom provider in Orbit settings.');
   if (!modelName()) throw new Error('Choose a model in Orbit settings.');
   if (p.kind === 'anthropic') {
-    const r = await window.app.llm({ url, headers: { 'anthropic-version': '2023-06-01' }, body: toAnthropic(sys, tools), keyName: 'key.' + orbit.provider, keyHeader: 'x-api-key', keyPrefix: '' });
+    const r = await window.app.llm({ url, headers: { 'anthropic-version': '2023-06-01' }, body: toAnthropic(sys, tools, cv), keyName: 'key.' + orbit.provider, keyHeader: 'x-api-key', keyPrefix: '' });
     if (!r.ok) throw new Error(r.error);
     const blocks = r.data.content || [];
     return { text: blocks.filter(b => b.type === 'text').map(b => b.text).join('\n').trim(), calls: blocks.filter(b => b.type === 'tool_use').map(b => ({ id: b.id, name: b.name, args: b.input || {} })) };
   }
   const extra = orbit.provider === 'openrouter' ? { 'HTTP-Referer': 'https://mininet.browser', 'X-Title': 'MiniNet Browser' } : {};
-  const r = await window.app.llm({ url, headers: extra, body: toOpenAI(sys, tools), keyName: p.key ? 'key.' + orbit.provider : null });
+  const r = await window.app.llm({ url, headers: extra, body: toOpenAI(sys, tools, cv), keyName: p.key ? 'key.' + orbit.provider : null });
   if (!r.ok) {
     if (orbit.provider === 'ollama' && /fetch failed|ECONNREFUSED/i.test(r.error)) throw new Error('Ollama is not running. Start Ollama on this computer (and pull a model that supports tools, e.g. "ollama pull qwen2.5:7b").');
     throw new Error(r.error);
@@ -240,6 +247,29 @@ async function callModel() {
   };
 }
 
+// One agent loop, shared by Orbit and its helper agents
+async function runLoop(cv, { client = 'Orbit', owner, sysExtra = '', exclude = null, shouldStop = () => false, onPaint = () => {}, onStep = () => {} } = {}) {
+  let finalText = '';
+  for (let step = 0; step < 80; step++) {
+    if (shouldStop()) { cv.push({ role: 'error', text: 'Stopped.' }); break; }
+    const res = await callModel(cv, sysExtra, exclude);
+    const msg = { role: 'assistant', text: res.text, calls: res.calls.map(c => ({ ...c, status: 'run' })) };
+    cv.push(msg); onPaint();
+    if (res.text) finalText = res.text;
+    if (!res.calls.length) break;
+    const results = [];
+    for (const c of msg.calls) {
+      if (shouldStop()) { results.push({ id: c.id, name: c.name, content: [{ type: 'text', text: 'Stopped by user' }], isError: true }); c.status = 'err'; continue; }
+      const r = await window.app.agentCall(c.name, c.args, client, owner);
+      c.status = r.ok && !r.result.isError ? 'ok' : 'err';
+      results.push({ id: c.id, name: c.name, content: r.ok ? r.result.content : [{ type: 'text', text: 'Error: ' + r.error }], isError: !r.ok });
+      onStep(c); onPaint();
+    }
+    cv.push({ role: 'tool', results });
+  }
+  return finalText;
+}
+
 async function sendOrbit(textOverride) {
   if (running) return;
   const ta = $('#oText');
@@ -249,30 +279,59 @@ async function sendOrbit(textOverride) {
   if (ta) ta.value = '';
   convo.push({ role: 'user', text });
   running = true; abortFlag = false; paintConvo();
+  await window.app.agentRelease('Orbit');   // a new request starts from the tab you are looking at
   let finalText = '';
   try {
-    for (let step = 0; step < 40; step++) {
-      if (abortFlag) { convo.push({ role: 'error', text: 'Stopped.' }); break; }
-      const res = await callModel();
-      const msg = { role: 'assistant', text: res.text, calls: res.calls.map(c => ({ ...c, status: 'run' })) };
-      convo.push(msg); paintConvo();
-      if (res.text) finalText = res.text;
-      if (!res.calls.length) break;
-      const results = [];
-      for (const c of msg.calls) {
-        if (abortFlag) { results.push({ id: c.id, name: c.name, content: [{ type: 'text', text: 'Stopped by user' }], isError: true }); c.status = 'err'; continue; }
-        const r = await window.app.agentCall(c.name, c.args, 'Orbit');
-        c.status = r.ok && !r.result.isError ? 'ok' : 'err';
-        results.push({ id: c.id, name: c.name, content: r.ok ? r.result.content : [{ type: 'text', text: 'Error: ' + r.error }], isError: !r.ok });
-        paintConvo();
-      }
-      convo.push({ role: 'tool', results });
-    }
+    finalText = await runLoop(convo, { sysExtra: 'For jobs with several independent parts (for example: edit a video, answer Instagram messages and research prices), you may start helper agents with start_helper — each works in its own tab at the same time — then use check_helpers to collect their reports. For a single job, just do it yourself.', shouldStop: () => abortFlag, onPaint: paintConvo });
   } catch (e) {
     convo.push({ role: 'error', text: e.message });
   }
   running = false; paintConvo();
   if (orbit.speak && finalText) speak(finalText);
+}
+
+/* ---------------- helper agents (a team of Orbits, each in its own tab) ---------------- */
+const helpers = []; let helperSeq = 0;
+const HELPER_EXCLUDE = new Set(['start_helper', 'stop_helper', 'check_helpers', 'close_other_tabs']);
+function helperView(h) { return { name: h.name, task: h.task.slice(0, 300), status: h.status, tab: h.tab, steps: h.steps, started_by: h.by, report: (h.result || '').slice(0, 3000), error: h.error || undefined }; }
+async function startHelper({ task, url, by }) {
+  if (!task) throw new Error('Give the helper a task.');
+  if (helpers.filter(h => h.status === 'running').length >= 8) throw new Error('8 helpers are already running — wait for some to finish (check_helpers) or stop one.');
+  if (prov().key && !(await window.app.secretHas('key.' + orbit.provider))) throw new Error('Helpers use the AI chosen in Orbit settings, and it has no API key yet. Ask the owner to add one (or pick free Ollama) in Orbit settings.');
+  const n = ++helperSeq, name = 'Orbit · Helper ' + n, owner = 'helper:' + n;
+  const h = { n, name, owner, task, by: by || 'Orbit', status: 'running', steps: 0, result: '', tab: null, stop: false, cv: [{ role: 'user', text: task }] };
+  helpers.push(h);
+  const r = await window.app.agentCall('open_tab', { url: url || 'https://www.google.com', background: true }, name, owner);
+  if (r.ok) { try { h.tab = JSON.parse(r.result.content[0].text).opened; } catch {} }
+  paintHelpers();
+  const sys = `You are ${name}, a helper agent started by ${h.by}. Do only this job: ${task}
+Your own tab is tab ${h.tab}. Work there (pass tab ${h.tab}, or leave tab out). Other AIs are working in other tabs at the same time — do not touch their tabs.
+If the owner must sign in somewhere, use ask_user to let them, then continue. When finished, reply with a short report of what you did and what you found.`;
+  runLoop(h.cv, { client: name, owner, sysExtra: sys, exclude: HELPER_EXCLUDE, shouldStop: () => h.stop, onStep: () => { h.steps++; }, onPaint: paintHelpers })
+    .then(t => { h.result = t || '(finished without a report)'; h.status = h.stop ? 'stopped' : 'done'; })
+    .catch(e => { h.status = 'failed'; h.error = e.message; })
+    .finally(() => { paintHelpers(); window.app.agentRelease(owner); toast(name + (h.status === 'done' ? ' finished' : ' ' + h.status)); });
+  return { started: name, tab: h.tab, note: 'Working in the background. Use check_helpers to follow it.' };
+}
+AGENT_OPS.helper = async ({ op, task, url, by, name }) => {
+  if (op === 'start') return startHelper({ task, url, by });
+  if (op === 'list') return helpers.map(helperView);
+  if (op === 'stop') { let k = 0; helpers.forEach(h => { if (h.status === 'running' && (name === 'all' || h.name.toLowerCase() === String(name).toLowerCase())) { h.stop = true; k++; } }); paintHelpers(); return { stopping: k }; }
+  throw new Error('bad helper op');
+};
+let helpersPaintT = 0;
+function paintHelpers() {
+  clearTimeout(helpersPaintT);
+  helpersPaintT = setTimeout(() => {
+    const box = $('#oTeam'); if (!box) return;
+    if (!helpers.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    box.innerHTML = `<div class="tmh"><b>Team</b><small>${helpers.filter(h => h.status === 'running').length} working</small></div>` + helpers.slice(-8).map(h => `<div class="tm">
+      <span class="dot ${h.status}"></span><div class="tx"><div>${esc(h.name.replace('Orbit · ', ''))} <small>· ${h.steps} steps${h.tab ? ' · tab ' + h.tab : ''}</small></div><small title="${esc(h.task)}">${esc(h.status === 'running' ? h.task : (h.result || h.error || h.task)).slice(0, 140)}</small></div>
+      ${h.tab ? `<button class="btn sm" data-ht="${h.tab}">View</button>` : ''}${h.status === 'running' ? `<button class="btn sm" data-hs="${esc(h.name)}">Stop</button>` : ''}</div>`).join('');
+    box.querySelectorAll('[data-ht]').forEach(b => b.onclick = () => { const t = tabs.find(x => x.id === +b.dataset.ht); if (t) activate(t); });
+    box.querySelectorAll('[data-hs]').forEach(b => b.onclick = () => AGENT_OPS.helper({ op: 'stop', name: b.dataset.hs }));
+  }, 80);
 }
 
 function renderOrbitSettings(body) {
@@ -283,7 +342,7 @@ function renderOrbitSettings(body) {
     <div class="set"><b>AI provider</b><small>Orbit uses your own account — your key is stored encrypted on this computer only.</small>
       <select class="inp" id="osProv">${Object.entries(PROVIDERS).map(([k, v]) => `<option value="${k}" ${orbit.provider === k ? 'selected' : ''}>${v.name}</option>`).join('')}</select>
       <label style="display:block">Model<input class="inp" id="osModel" value="${esc(modelName())}" placeholder="model name"></label>
-      ${orbit.provider === 'custom' || orbit.provider === 'ollama' ? `<label style="display:block">API address<input class="inp" id="osUrl" value="${esc(provUrl())}" placeholder="https://…/v1/chat/completions"></label>` : ''}
+      ${orbit.provider === 'custom' || orbit.provider === 'ollama' || orbit.provider === 'lmstudio' ? `<label style="display:block">API address<input class="inp" id="osUrl" value="${esc(provUrl())}" placeholder="https://…/v1/chat/completions"></label>` : ''}
       ${p.key ? `<label style="display:block">API key <span id="osHas" style="color:var(--dim)"></span><input class="inp" id="osKey" type="password" placeholder="paste your key"></label>
         <small>Get a key at ${esc(p.keyHelp)}</small>` : `<small>No key needed. Install Ollama, then run <code>ollama pull ${esc(modelName())}</code>. Pick a model that supports tools (qwen2.5, llama3.1, mistral-nemo).</small>`}
     </div>

@@ -25,6 +25,7 @@
 Most AI assistants can talk about the web. MiniNet Browser lets them **use** it — click, type, shop, post, fill forms, watch videos and build things — while you watch every step and stay in charge.
 
 - 🤖 **Any AI can drive it** — Claude (Desktop, Code, claude.ai connector), ChatGPT (connectors or custom GPT Actions), Cursor, Windsurf, Codex, Gemini, local Ollama models, or your own scripts.
+- 👥 **Many AIs at once** — Claude, ChatGPT and Gemini can all work in the browser at the same time, each in its own tab. Any AI can also start **helper agents** (`start_helper`) that work in parallel — one answers messages while another edits or researches. Watch them all side by side in **Team view**.
 - 🔗 **Permanent connector link** — set up a free ngrok address once; paste the link into your AI and it keeps working every time the browser is open.
 - 🎯 **Missions with proof** — goals, budgets and success checks the browser verifies itself, with a replayable evidence record.
 - ✋ **You approve first** — an AI shows its plan; you press **Allow**, **Always allow** or **Deny**. A glowing outline and a "Claude is using the browser · Stop AI" bar show exactly what it's doing.
@@ -58,17 +59,19 @@ Open the 🔌 **AI control** panel in the sidebar.
 | **Claude Code** | Copy the one-line `claude mcp add …` command shown in the panel. |
 | **claude.ai / ChatGPT connectors** | Turn on the **Permanent link** (free ngrok authtoken, one-time), copy the connector link, add it as a custom connector (choose *No sign in*). |
 | **ChatGPT custom GPT** | Configure → Actions → *Import from URL* → paste the **ChatGPT Actions link**. |
+| **Orbit with any model** | Claude, ChatGPT, Gemini, Grok, DeepSeek, Kimi, Qwen, Mistral, Groq, OpenRouter — or free local Ollama / LM Studio. |
 | **Local AI (Ollama, LM Studio)** | Pick *Ollama* in Orbit settings, or point any local MCP client at the **local link** `http://127.0.0.1:7811/t/<key>/mcp`. |
 | **Cursor, Windsurf, Codex, others** | Copy the MCP JSON config from the panel. |
 | **Your own code** | `POST http://127.0.0.1:7811/api/tools/<tool>` with `Authorization: Bearer <key>` |
 
-### Tools an AI gets (35)
+### Tools an AI gets (38)
 
 `list_tabs` `open_tab` `navigate` `go_back` `go_forward` `reload` `switch_tab` `close_tab` `close_other_tabs`
 `snapshot` `read_text` `click` `type` `select_option` `press_key` `scroll` `hover` `screenshot` `run_js` `wait_for` `download`
 `speak` `show_message` `request_permission` `ask_user`
 `list_extensions` `get_extension` `save_extension` `toggle_extension` `delete_extension`
 `mission_start` `mission_verify` `mission_note` `mission_finish` `mission_report`
+`start_helper` `check_helpers` `stop_helper`
 
 Agents see inside embedded frames (payment boxes, embedded forms, MiniNet sites), click by visible text (`click {text:"Reject all"}`), and get warned when a pop-up covers what they're clicking.
 

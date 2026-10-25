@@ -113,9 +113,11 @@ function renderTabs() {
   box.innerHTML = '';
   tabs.forEach(t => {
     const el = document.createElement('div');
-    el.className = 'tab' + (t === active ? ' on' : '') + (narrow ? ' narrow' : '');
+    el.className = 'tab' + (t === active ? ' on' : '') + (narrow ? ' narrow' : '') + (t.agent ? ' agent' : '');
+    if (t.agent) el.style.setProperty('--agc', t.agentColor || '#2dd4bf');
     el.title = t.title + '\n' + display(t.url);
     el.innerHTML = (t.loading ? '<span class="spin"></span>' : `<img class="fav" src="${esc(t.fav || favicon(display(t.url) || t.url))}">`) +
+      (t.agent ? `<span class="ag" style="background:${esc(t.agentColor || '#2dd4bf')}" title="${esc(t.agent)} is working in this tab">${esc(t.agent)}</span>` : '') +
       `<span class="tt">${esc(t.title)}</span><button class="x" title="Close tab (Ctrl+W)"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>`;
     el.onmousedown = e => { if (e.button === 1) { e.preventDefault(); closeTab(t); } else if (e.button === 0 && !e.target.closest('.x')) activate(t); };
     el.querySelector('.x').onclick = e => { e.stopPropagation(); closeTab(t); };
@@ -126,6 +128,7 @@ function renderTabs() {
 }
 function wireWebview(t) {
   const wv = t.wv;
+  wv.addEventListener('focus', () => { if (teamView && active !== t) activate(t); });
   const nav = (url) => { t.url = url; if (t === active) updateToolbar(); saveSession(); };
   wv.addEventListener('did-start-loading', () => { t.loading = true; renderTabs(); if (t === active) updateToolbar(); });
   wv.addEventListener('did-stop-loading', () => { t.loading = false; renderTabs(); if (t === active) updateToolbar(); });
@@ -532,7 +535,9 @@ function tabInfo(t) { return { id: t.id, wcId: wcIdOf(t), url: t.url, title: t.t
 async function waitWc(t, ms = 8000) { const end = Date.now() + ms; while (!wcIdOf(t) && Date.now() < end) await new Promise(r => setTimeout(r, 50)); return wcIdOf(t); }
 const AGENT_OPS = {
   list: () => tabs.map(tabInfo),
-  open: async ({ url, background }) => { const t = newTab(resolve(url), { background }); await waitWc(t); return tabInfo(t); },
+  open: async ({ url, background }) => { const t = newTab(url ? resolve(url) : undefined, { background }); await waitWc(t); return tabInfo(t); },
+  owner: ({ id, name, color }) => { const t = tabs.find(x => x.id === id); if (!t) return false; t.agent = name || null; t.agentColor = color; t.wv.classList.toggle('work', !!name); renderTabs(); paintTeam(); return true; },
+  peek: ({ id }) => { const t = tabs.find(x => x.id === id); if (!t) return false; t.wv.classList.add('work'); setTimeout(() => { if (!t.agent) t.wv.classList.remove('work'); }, 8000); return true; },
   navigate: ({ id, url }) => { const t = tabs.find(x => x.id === id); if (!t) throw new Error('No such tab'); t.wv.loadURL(resolve(url)).catch(() => {}); t.url = resolve(url); if (t === active) updateToolbar(); return true; },
   resolve: ({ url }) => resolve(url),
   activate: ({ id }) => { const t = tabs.find(x => x.id === id); if (!t) throw new Error('No such tab'); activate(t); return true; },
@@ -545,6 +550,15 @@ window.app.on('agent-req', async ({ id, op, args }) => {
   try { const result = await AGENT_OPS[op](args || {}, id); window.app.agentRespond({ id, ok: true, result }); }
   catch (e) { window.app.agentRespond({ id, ok: false, error: e.message }); }
 });
+/* team view: watch every AI's tab side by side */
+let teamView = false;
+function paintTeam() {
+  const n = new Set(tabs.filter(t => t.agent).map(t => t.agent)).size;
+  const b = $('#teamN'); if (b) { b.style.display = n ? 'block' : 'none'; b.textContent = n; }
+  $('#bTeam').classList.toggle('active', teamView);
+  $('#views').classList.toggle('grid', teamView);
+}
+$('#bTeam').onclick = () => { teamView = !teamView; paintTeam(); if (teamView && !tabs.some(t => t.agent)) toast('Team view: tabs where AIs are working appear here side by side'); };
 function speak(text) {
   try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(String(text).replace(/[*_`#>]/g, '')); u.rate = 1.03; speechSynthesis.speak(u); } catch {}
 }
