@@ -213,7 +213,7 @@ function toOpenAI(sys, tools, convo, pk = orbit.provider) {
       const recent = toolRounds - roundIdx < 2;
       const imgs = [];
       for (const r of m.results) {
-        let t = contentText(r.content); if (!recent) t = t.slice(0, 1500);
+        let t = contentText(r.content); if (!recent) t = t.slice(0, 1500); else if (LOCAL_BRAINS.has(pk) && t.length > 3500) t = t.slice(0, 3500) + '\n[… cut to fit a local model — use read_text with offset for more]';
         msgs.push({ role: 'tool', tool_call_id: r.id, content: (r.isError ? 'ERROR: ' : '') + (t || 'done') });
         r.content.filter(c => c.type === 'image').forEach(c => imgs.push(c));
       }
@@ -236,10 +236,13 @@ async function ollamaPick() {
     for (const p of pref) { const m = names.find(n => p.test(n) && !/embed/i.test(n)); if (m) { orbit.models.ollama = m; saveOrbit(); toast('Orbit is using your local model ' + m); return; } }
   } catch {}
 }
+const LOCAL_BRAINS = new Set(['ollama', 'lmstudio']);
+const LITE_TOOLS = new Set(['list_tabs', 'open_tab', 'navigate', 'go_back', 'switch_tab', 'snapshot', 'read_text', 'click', 'type', 'press_key', 'scroll', 'wait_for', 'select_option', 'ask_user', 'answer_dialog', 'speak', 'start_helper', 'check_helpers']);
 // Ask one brain (provider) for the next step
 async function callBrain(pk, cv, sysExtra = '', exclude = null) {
   const p = prov(pk), sys = (await systemPrompt()) + (sysExtra ? '\n' + sysExtra : '');
   let tools = await getTools(); if (exclude) tools = tools.filter(t => !exclude.has(t.name));
+  if (LOCAL_BRAINS.has(pk)) tools = tools.filter(t => LITE_TOOLS.has(t.name));   // small local models do better with fewer tools
   const url = provUrl(pk);
   if (!url) throw new Error('Set the API address for the custom provider in Orbit settings.');
   if (!modelName(pk)) throw new Error('Choose a model in Orbit settings.');

@@ -376,7 +376,7 @@ ipcMain.handle('tunnel', async (e, op, opts = {}) => {
     const patch = {};
     if (opts.provider === 'ngrok' || opts.provider === 'cloudflare') patch.provider = opts.provider;
     if (opts.domain !== undefined) patch.domain = cleanDomain(opts.domain);
-    if (opts.ngrokKey !== undefined) { const s = readSecrets(); if (opts.ngrokKey) s.ngrok = String(opts.ngrokKey).trim(); else delete s.ngrok; writeSecrets(s); }
+    if (opts.ngrokKey !== undefined) { const s = readSecrets(true); if (opts.ngrokKey) s.ngrok = String(opts.ngrokKey).trim(); else delete s.ngrok; writeSecrets(s); }
     const was = tunnelConf(); tunnelConf(patch);
     if (tunnel.proc && (patch.provider && patch.provider !== was.provider || patch.domain !== undefined || opts.ngrokKey)) { tunnelStop(); tunnelConf({ on: true }); tunnelStart(); }
   }
@@ -409,18 +409,23 @@ ipcMain.handle('ext', async (e, { op, id, enabled, data }) => {
 
 /* ---------------- IPC: Orbit (built-in AI) ---------------- */
 function secretsFile() { return path.join(app.getPath('userData'), 'secrets.bin'); }
-function readSecrets() {
+function readSecrets(strict) {
+  let buf; try { buf = fs.readFileSync(secretsFile()); } catch { return {}; }   // no file yet
   try {
-    const buf = fs.readFileSync(secretsFile());
     const json = safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString('utf8');
     return JSON.parse(json);
-  } catch { return {}; }
+  } catch (e) {
+    // never overwrite saved keys because of a failed read — keep a backup and refuse to write
+    try { fs.copyFileSync(secretsFile(), secretsFile() + '.bak'); } catch {}
+    if (strict) throw new Error('Could not read your saved keys (' + e.message + '). Nothing was changed.');
+    return {};
+  }
 }
 function writeSecrets(s) {
   const json = JSON.stringify(s);
   fs.writeFileSync(secretsFile(), safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(json) : Buffer.from(json));
 }
-ipcMain.handle('secret-set', (e, { key, value }) => { const s = readSecrets(); if (value) s[key] = value; else delete s[key]; writeSecrets(s); return true; });
+ipcMain.handle('secret-set', (e, { key, value }) => { const s = readSecrets(true); if (value) s[key] = value; else delete s[key]; writeSecrets(s); return true; });
 ipcMain.handle('secret-has', (e, key) => !!readSecrets()[key]);
 
 // Orbit's requests to AI providers go from here (no browser CORS limits; keys never touch web pages)
