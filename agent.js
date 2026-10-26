@@ -730,15 +730,17 @@ async function gmailFeed() {
   const ses = eSession.fromPartition('persist:main');
   const all = [];
   for (let u = 0; u < 4; u++) {
-    let xml = '';
-    try { const r = await ses.fetch(`https://mail.google.com/mail/u/${u}/feed/atom`, { redirect: 'follow' }); if (!r.ok) break; xml = await r.text(); } catch { break; }
+    let xml = '', serverNow = 0;
+    try { const r = await ses.fetch(`https://mail.google.com/mail/u/${u}/feed/atom`, { redirect: 'follow' }); if (!r.ok) break; serverNow = Date.parse(r.headers.get('date') || '') || 0; xml = await r.text(); } catch { break; }
     if (!/<feed/.test(xml)) break;
     const acct = (xml.match(/<title>Gmail - Inbox for ([^<]+)<\/title>/) || [])[1] || `account ${u}`;
+    // use Gmail's clock, not the computer's (a wrong PC clock or time zone would make every email look old)
+    const skew = serverNow ? Date.now() - serverNow : 0;
     if (all.some(e => e.account === acct)) break;   // Gmail falls back to account 0 when u is too high
     const dec = x => String(x || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
     for (const m of xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
       const e = m[1], g = k => dec((e.match(new RegExp(`<${k}>([\\s\\S]*?)</${k}>`)) || [])[1]);
-      all.push({ account: acct, title: g('title'), summary: g('summary'), from: g('name') + ' <' + g('email') + '>', time: Date.parse(g('issued') || g('modified')) || 0 });
+      all.push({ account: acct, title: g('title'), summary: g('summary'), from: g('name') + ' <' + g('email') + '>', time: (Date.parse(g('issued') || g('modified')) || 0) + skew });
     }
   }
   return all;
