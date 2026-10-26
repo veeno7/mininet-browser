@@ -367,6 +367,7 @@ async function runLoop(cv, { client = 'Orbit', owner, sysExtra = '', exclude = n
     const results = [];
     for (const c of msg.calls) {
       if (shouldStop()) { results.push({ id: c.id, name: c.name, content: [{ type: 'text', text: 'Stopped by user' }], isError: true }); c.status = 'err'; continue; }
+      if (c.name === 'type' && LOCAL_BRAINS.has(orbit.provider) && c.args && c.args.submit == null && !c.args.append) c.args.submit = 'auto';
       const r = await window.app.agentCall(c.name, c.args, client, owner);
       c.status = r.ok && !r.result.isError ? 'ok' : 'err';
       if (READ_TOOLS.has(c.name) && c.status === 'ok') readSinceMove = true;
@@ -424,7 +425,7 @@ async function startHelper({ task, url, by }) {
   if (r.ok) { try { h.tab = JSON.parse(r.result.content[0].text).opened; } catch {} }
   paintHelpers();
   const sys = `You are ${name}, a helper agent started by ${h.by}. Do only this job: ${task}
-Your own tab is tab ${h.tab}. Work there (pass tab ${h.tab}, or leave tab out). Other AIs are working in other tabs at the same time — do not touch their tabs.
+Your own tab is tab ${h.tab}${url ? ` and it already shows ${url} — start there, and do not guess other addresses` : ''}. Work there (pass tab ${h.tab}, or leave tab out). Other AIs are working in other tabs at the same time — do not touch their tabs.
 If the owner must sign in somewhere, use ask_user to let them, then continue. When finished, reply with a short report of what you did and what you found.`;
   runLoop(h.cv, { client: name, owner, sysExtra: sys, exclude: HELPER_EXCLUDE, shouldStop: () => h.stop, onStep: () => { h.steps++; }, onTrace: t => h.trace.push(t), onPaint: paintHelpers })
     .then(t => { h.result = t || '(finished without a report)'; h.status = h.stop ? 'stopped' : 'done'; })

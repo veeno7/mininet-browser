@@ -338,7 +338,7 @@ const TOOLS = {
             if (!document.execCommand('insertText', false, ${JSON.stringify(String(a.text))})) { const proto = e.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; const d = Object.getOwnPropertyDescriptor(proto, 'value'); if (d) d.set.call(e, ${a.append ? "e.value + " : ""}${JSON.stringify(String(a.text))}); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); }
             return true; })()`);
           if (!ok) throw new Error('Could not focus that field');
-          if (a.submit) { await fjs(p.frame, `(() => { const e = document.activeElement; const o = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }; e.dispatchEvent(new KeyboardEvent('keydown', o)); e.dispatchEvent(new KeyboardEvent('keypress', o)); e.dispatchEvent(new KeyboardEvent('keyup', o)); if (e.form) { if (e.form.requestSubmit) e.form.requestSubmit(); else e.form.submit(); } })()`).catch(() => {}); await waitLoad(wc, 15000, 1200); }
+          if (a.submit === true) { await fjs(p.frame, `(() => { const e = document.activeElement; const o = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }; e.dispatchEvent(new KeyboardEvent('keydown', o)); e.dispatchEvent(new KeyboardEvent('keypress', o)); e.dispatchEvent(new KeyboardEvent('keyup', o)); if (e.form) { if (e.form.requestSubmit) e.form.requestSubmit(); else e.form.submit(); } })()`).catch(() => {}); await waitLoad(wc, 15000, 1200); }
           return text({ typed: a.text.length + ' characters', inEmbeddedFrame: true, submitted: !!a.submit, url: displayUrl(wc.getURL()) });
         }
         await mouseClick(wc, p);
@@ -358,6 +358,7 @@ const TOOLS = {
         const landed = await js(wc, `(() => { let f = document.activeElement; while (f && f.shadowRoot && f.shadowRoot.activeElement) f = f.shadowRoot.activeElement; if (!f || f === document.body || f === document.documentElement) return 'none'; if (f.tagName === 'IFRAME') return 'frame'; const v = ('value' in f ? f.value : f.innerText) || ''; return v.includes(${JSON.stringify(tail)}) ? 'ok' : 'other:' + f.tagName.toLowerCase(); })()`).catch(() => 'ok');
         if (landed === 'none') throw new Error('Nothing took the typing — that field is probably hidden or collapsed. Click the button that opens it first (for example a search icon), then type again.');
       }
+      if (a.submit === 'auto') a.submit = await js(wc, `(() => { let e = document.activeElement; while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement; if (!e) return false; const s = [e.type, e.name, e.id, e.placeholder, e.getAttribute('aria-label'), e.getAttribute('role')].join(' '); return e.type === 'search' || /searchbox|combobox/.test(e.getAttribute('role') || '') || /search|query|\\bq\\b/i.test(s); })()`).catch(() => false);
       if (a.submit) { await sleep(80); pressKey(wc, 'Enter'); await waitLoad(wc, 15000, 1200); }
       return text({ typed: a.text.length + ' characters', submitted: !!a.submit, url: displayUrl(wc.getURL()) });
     }
