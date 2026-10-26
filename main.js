@@ -467,12 +467,29 @@ ipcMain.handle('secret-set', (e, { key, value }) => { const s = readSecrets(true
 ipcMain.handle('secret-has', (e, key) => !!readSecrets()[key]);
 
 // Orbit's requests to AI providers go from here (no browser CORS limits; keys never touch web pages)
+function localHttp(url, opts, limit) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = require('http').request({ hostname: u.hostname, port: u.port || 80, path: u.pathname + u.search, method: opts.method, headers: opts.headers, timeout: limit }, res => {
+      const chunks = []; res.on('data', c => chunks.push(c));
+      res.on('end', () => { const body = Buffer.concat(chunks).toString('utf8'); resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: async () => body }); });
+    });
+    req.on('timeout', () => req.destroy(new Error('timed out after ' + Math.round(limit / 60000) + ' min')));
+    req.on('error', reject);
+    if (opts.body) req.write(opts.body);
+    req.end();
+  });
+}
 ipcMain.handle('llm', async (e, { url, method = 'POST', headers = {}, body, keyName, keyHeader = 'Authorization', keyPrefix = 'Bearer ', timeoutMs = 180000 }) => {
   if (!/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url)) return { ok: false, error: 'Only https:// or local AI endpoints are allowed' };
   const key = keyName ? readSecrets()[keyName] : null;
   if (keyName && !key) return { ok: false, error: 'No API key saved for this provider yet. Add it in Orbit settings.' };
   try {
-    const r = await fetch(url, { method: method === 'GET' ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', ...headers, ...(key ? { [keyHeader]: keyPrefix + key } : {}) }, body: method === 'GET' ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(Math.min(+timeoutMs || 180000, 900000)) });
+    const opts = { method: method === 'GET' ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', ...headers, ...(key ? { [keyHeader]: keyPrefix + key } : {}) }, body: method === 'GET' ? undefined : JSON.stringify(body) };
+    const limit = Math.min(+timeoutMs || 180000, 900000);
+    // local AI (Ollama / LM Studio) can think for many minutes on a laptop; Node's fetch gives up after 5 min with
+    // "fetch failed", so talk to it with plain http and only our own time limit
+    const r = /^http:\/\//i.test(url) ? await localHttp(url, opts, limit) : await fetch(url, { ...opts, signal: AbortSignal.timeout(limit) });
     const t = await r.text();
     let j; try { j = JSON.parse(t); } catch { j = null; }
     if (!r.ok) { const m = (j && (j.error && (j.error.message || j.error))) || t.slice(0, 400); return { ok: false, status: r.status, error: 'HTTP ' + r.status + (m ? ': ' + (typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 400) : '') }; }

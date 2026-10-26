@@ -178,7 +178,9 @@ ${orbit.instructions ? 'User\'s custom instructions: ' + orbit.instructions : ''
 function localPrompt() {
   // keep this text identical between steps so the local model can reuse its cache (no changing tab info here)
   return `You are Orbit, an assistant that uses the user's web browser with tools.
-Steps: open_tab or navigate to a site, snapshot to see numbered elements, click/type using ref numbers, read_text to read. Do the whole task yourself, then answer in one or two short sentences.
+Steps: open_tab or navigate to a site, snapshot to see numbered elements, click/type using ref numbers, read_text to read (read_text with find:"word" shows just the lines about that word). To search a site: type in its search box with submit:true, then read the results.
+Rules: every fact in your answer (names, numbers, titles, prices) must be copied exactly from a tool result in this task — never from memory, never guessed. If you could not find it, say "I could not find it" and why.
+Do the whole task yourself, then answer in one or two short sentences.
 ${orbit.instructions ? 'User notes: ' + orbit.instructions : ''}`;
 }
 async function getTools() { if (!toolDefs) toolDefs = await window.app.agentTools(); return toolDefs; }
@@ -232,7 +234,7 @@ function toOpenAI(sys, tools, convo, pk = orbit.provider) {
       if (imgs.length && recent && prov(pk).vision) msgs.push({ role: 'user', content: [{ type: 'text', text: 'Screenshot from the tool above:' }, ...imgs.map(c => ({ type: 'image_url', image_url: { url: `data:${c.mimeType};base64,${c.data}` } }))] });
     }
   }
-  return { model: modelName(pk), messages: msgs, tools: tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.inputSchema } })), tool_choice: 'auto' };
+  return { model: modelName(pk), messages: msgs, tools: tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.inputSchema } })), tool_choice: 'auto', ...(LOCAL_BRAINS.has(pk) ? { max_tokens: 700, temperature: 0.2 } : {}) };
 }
 
 // Local Ollama: if the chosen model isn't installed, use the best installed model that can use tools
@@ -272,7 +274,8 @@ async function callBrain(pk, cv, sysExtra = '', exclude = null) {
   const extra = pk === 'openrouter' ? { 'HTTP-Referer': 'https://mininet.browser', 'X-Title': 'MiniNet Browser' } : {};
   const r = await window.app.llm({ url, headers: extra, body: toOpenAI(sys, tools, cv, pk), keyName: p.key ? 'key.' + pk : null, timeoutMs: LOCAL_BRAINS.has(pk) ? 900000 : 180000 });
   if (!r.ok) {
-    if ((pk === 'ollama' || pk === 'lmstudio') && /fetch failed|ECONNREFUSED/i.test(r.error)) throw new Error(p.name.split(' (')[0] + ' is not running. Start it on this computer (and pull a model that supports tools, e.g. "ollama pull qwen2.5:7b").');
+    if ((pk === 'ollama' || pk === 'lmstudio') && /timed out/i.test(r.error)) throw new Error(p.name.split(' (')[0] + ' took too long to answer (' + r.error + '). The page may be too big for the local model — try a smaller step.');
+    if ((pk === 'ollama' || pk === 'lmstudio') && /ECONNREFUSED/i.test(r.error)) throw new Error(p.name.split(' (')[0] + ' is not running. Start it on this computer (and pull a model that supports tools, e.g. "ollama pull qwen2.5:7b").');
     throw new Error(r.error);
   }
   const msg = (r.data.choices && r.data.choices[0] && r.data.choices[0].message) || {};
@@ -326,20 +329,40 @@ async function callModel(cv = convo, sysExtra = '', exclude = null) {
 }
 
 // One agent loop, shared by Orbit and its helper agents
-async function runLoop(cv, { client = 'Orbit', owner, sysExtra = '', exclude = null, shouldStop = () => false, onPaint = () => {}, onStep = () => {} } = {}) {
-  let finalText = '';
+// Which facts in an answer (numbers, "quoted" names, version numbers) never appeared in any tool result of this task
+function unverified(answer, cv) {
+  const seen = cv.filter(m => m.role === 'tool').flatMap(m => m.results.map(r => contentText(r.content))).join('\n').toLowerCase().replace(/[,\u00a0]/g, '');
+  const task = cv.filter(m => m.role === 'user').map(m => m.text).join(' ').toLowerCase().replace(/,/g, '');
+  const claims = new Set();
+  for (const m of answer.matchAll(/["“]([^"”]{3,80})["”]/g)) claims.add(m[1].trim());
+  for (const m of answer.matchAll(/\bv?\d[\d,]*(?:\.\d+)+\b|\b\d[\d,]{2,}\b/g)) claims.add(m[0]);
+  return [...claims].filter(c => { const k = c.toLowerCase().replace(/,/g, ''); return !seen.includes(k) && !task.includes(k); }).slice(0, 5);
+}
+async function runLoop(cv, { client = 'Orbit', owner, sysExtra = '', exclude = null, shouldStop = () => false, onPaint = () => {}, onStep = () => {}, onTrace = () => {} } = {}) {
+  let finalText = '', factChecked = false;
   for (let step = 0; step < 80; step++) {
     if (shouldStop()) { cv.push({ role: 'error', text: 'Stopped.' }); break; }
     const res = await callModel(cv, sysExtra, exclude);
     const msg = { role: 'assistant', text: res.text, calls: res.calls.map(c => ({ ...c, status: 'run' })) };
     cv.push(msg); onPaint();
     if (res.text) finalText = res.text;
-    if (!res.calls.length) break;
+    if (!res.calls.length) {
+      // fact check: numbers and quoted names in the answer must appear in something a tool actually returned
+      const unseen = res.text ? unverified(res.text, cv) : [];
+      if (unseen.length && !factChecked) {
+        factChecked = true; onTrace({ check: 'unverified: ' + unseen.join(', ') });
+        cv.push({ role: 'user', text: `Check your answer: ${unseen.map(x => '"' + x + '"').join(', ')} did not appear in any page you read in this task. Read the page again (read_text with find) and answer only with what it actually shows — or say you could not find it.` });
+        continue;
+      }
+      if (unseen.length) finalText = res.text + '\n\n⚠ Not confirmed on the page: ' + unseen.join(', ');
+      break;
+    }
     const results = [];
     for (const c of msg.calls) {
       if (shouldStop()) { results.push({ id: c.id, name: c.name, content: [{ type: 'text', text: 'Stopped by user' }], isError: true }); c.status = 'err'; continue; }
       const r = await window.app.agentCall(c.name, c.args, client, owner);
       c.status = r.ok && !r.result.isError ? 'ok' : 'err';
+      onTrace({ tool: c.name, args: JSON.stringify(c.args || {}).slice(0, 120), ok: c.status === 'ok', saw: (r.ok ? contentText(r.result.content) : 'Error: ' + r.error).replace(/\s+/g, ' ').slice(0, 160) });
       results.push({ id: c.id, name: c.name, content: r.ok ? r.result.content : [{ type: 'text', text: 'Error: ' + r.error }], isError: !r.ok });
       onStep(c); onPaint();
     }
@@ -371,13 +394,13 @@ async function sendOrbit(textOverride) {
 /* ---------------- helper agents (a team of Orbits, each in its own tab) ---------------- */
 const helpers = []; let helperSeq = 0;
 const HELPER_EXCLUDE = new Set(['start_helper', 'stop_helper', 'check_helpers', 'close_other_tabs']);
-function helperView(h) { return { name: h.name, task: h.task.slice(0, 300), status: h.status, tab: h.tab, steps: h.steps, started_by: h.by, report: (h.result || '').slice(0, 3000), error: h.error || undefined }; }
+function helperView(h) { return { name: h.name, task: h.task.slice(0, 300), status: h.status, tab: h.tab, steps: h.steps, seconds: Math.round(((h.ended || Date.now()) - h.t0) / 1000), started_by: h.by, report: (h.result || '').slice(0, 3000), error: h.error || undefined, trace: (h.trace || []).slice(-15) }; }
 async function startHelper({ task, url, by }) {
   if (!task) throw new Error('Give the helper a task.');
   if (helpers.filter(h => h.status === 'running').length >= 8) throw new Error('8 helpers are already running — wait for some to finish (check_helpers) or stop one.');
   if (!(await anyBrainReady())) throw new Error('Helpers use the AI brains chosen in Orbit settings, and none has an API key yet. Ask the owner to add one (or pick free Ollama) in Orbit settings.');
   const n = ++helperSeq, name = 'Orbit · Helper ' + n, owner = 'helper:' + n;
-  const h = { n, name, owner, task, by: by || 'Orbit', status: 'running', steps: 0, result: '', tab: null, stop: false, cv: [{ role: 'user', text: task }] };
+  const h = { n, name, owner, task, by: by || 'Orbit', status: 'running', steps: 0, result: '', tab: null, stop: false, t0: Date.now(), trace: [], cv: [{ role: 'user', text: task }] };
   helpers.push(h);
   const r = await window.app.agentCall('open_tab', { url: url || 'https://www.google.com', background: true }, name, owner);
   if (r.ok) { try { h.tab = JSON.parse(r.result.content[0].text).opened; } catch {} }
@@ -385,10 +408,10 @@ async function startHelper({ task, url, by }) {
   const sys = `You are ${name}, a helper agent started by ${h.by}. Do only this job: ${task}
 Your own tab is tab ${h.tab}. Work there (pass tab ${h.tab}, or leave tab out). Other AIs are working in other tabs at the same time — do not touch their tabs.
 If the owner must sign in somewhere, use ask_user to let them, then continue. When finished, reply with a short report of what you did and what you found.`;
-  runLoop(h.cv, { client: name, owner, sysExtra: sys, exclude: HELPER_EXCLUDE, shouldStop: () => h.stop, onStep: () => { h.steps++; }, onPaint: paintHelpers })
+  runLoop(h.cv, { client: name, owner, sysExtra: sys, exclude: HELPER_EXCLUDE, shouldStop: () => h.stop, onStep: () => { h.steps++; }, onTrace: t => h.trace.push(t), onPaint: paintHelpers })
     .then(t => { h.result = t || '(finished without a report)'; h.status = h.stop ? 'stopped' : 'done'; })
     .catch(e => { h.status = 'failed'; h.error = e.message; })
-    .finally(() => { paintHelpers(); window.app.agentRelease(owner); toast(name + (h.status === 'done' ? ' finished' : ' ' + h.status)); });
+    .finally(() => { h.ended = Date.now(); paintHelpers(); window.app.agentRelease(owner); toast(name + (h.status === 'done' ? ' finished' : ' ' + h.status)); });
   return { started: name, tab: h.tab, note: 'Working in the background. Use check_helpers to follow it.' };
 }
 AGENT_OPS.helper = async ({ op, task, url, by, name }) => {

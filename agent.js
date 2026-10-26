@@ -284,8 +284,8 @@ const TOOLS = {
     }
   },
   read_text: {
-    description: 'Get the readable text of the page (including embedded frames) or of one element (CSS selector). Good for long articles.',
-    schema: { ...TAB, selector: { type: 'string' }, offset: { type: 'integer' }, length: { type: 'integer', description: 'Default 20000' } },
+    description: 'Get the readable text of the page (including embedded frames) or of one element (CSS selector). Use find to get only the lines around a word (e.g. find:"population") — best for small models and long pages.',
+    schema: { ...TAB, find: { type: 'string', description: 'Only return the lines that mention this word, with the lines around them' }, selector: { type: 'string' }, offset: { type: 'integer' }, length: { type: 'integer', description: 'Default 20000' } },
     run: async a => {
       const { wc } = await tabWC(a.tab);
       let t = null;
@@ -296,6 +296,13 @@ const TOOLS = {
         const parts = [];
         for (const f of framesOf(wc)) { const x = await fjs(f, 'document.body ? document.body.innerText : ""').catch(() => ''); if (x && x.trim()) parts.push((f.parent ? '\n--- embedded frame ---\n' : '') + x); }
         t = parts.join('\n');
+      }
+      if (a.find) {
+        const lines = t.split('\n').map(x => x.trim()).filter(Boolean), q = String(a.find).toLowerCase(), keep = new Set();
+        lines.forEach((x, i) => { if (x.toLowerCase().includes(q)) for (let k = Math.max(0, i - 2); k <= Math.min(lines.length - 1, i + 3); k++) keep.add(k); });
+        if (!keep.size) return text(`"${a.find}" does not appear on this page. Try another word, scroll, or open a different page.`);
+        const out = []; let last = -2; [...keep].sort((x, y) => x - y).forEach(k => { if (k > last + 1) out.push('…'); out.push(lines[k]); last = k; });
+        return text(out.join('\n').slice(0, +a.length || 4000));
       }
       const off = +a.offset || 0, len = Math.min(+a.length || 20000, 100000);
       return text(t.slice(off, off + len) + (t.length > off + len ? `\n\n[… ${t.length - off - len} more characters, use offset ${off + len}]` : ''));
