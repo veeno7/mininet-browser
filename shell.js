@@ -28,6 +28,7 @@ let sideSites = load('sideSites', [
   { url: 'https://x.com/', title: 'X' }
 ]);
 // pin the creator & social apps once (CapCut, Instagram, Facebook, GitHub)
+if (!load('sideV4', false)) { if (!sideSites.some(s => /mail\.google\.com/.test(s.url))) sideSites.push({ url: 'https://mail.google.com/', title: 'Gmail' }); store('sideSites', sideSites); store('sideV4', true); }
 if (!load('sideV3', false)) { [['https://flow.google.com/', 'Google Flow']].forEach(([url, title]) => { if (!sideSites.some(s => s.title === title)) sideSites.push({ url, title }); }); store('sideSites', sideSites); store('sideV3', true); }
 if (!load('sideV2', false)) { [['https://www.capcut.com/my-edit', 'CapCut'], ['https://www.instagram.com/', 'Instagram'], ['https://www.facebook.com/', 'Facebook'], ['https://github.com/', 'GitHub']].forEach(([url, title]) => { if (!sideSites.some(s => s.title === title)) sideSites.push({ url, title }); }); store('sideSites', sideSites); store('sideV2', true); }
 let history = load('history', []);

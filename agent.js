@@ -6,7 +6,7 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { webContents, nativeImage, app: eApp } = require('electron');
+const { webContents, nativeImage, app: eApp, session: eSession } = require('electron');
 const ext = require('./extensions');
 
 let cfg = { enabled: true, port: 7811, token: '', mode: 'ask', trusted: [] };
@@ -712,6 +712,72 @@ Object.assign(TOOLS, {
   }
 });
 
+/* ---------------- sign-in codes from Gmail ---------------- */
+// Reads the owner's unread Gmail (the Google account signed in to this browser) for a fresh
+// verification code sent by the site the AI is signing in to. The owner approves each use,
+// and only codes from that same site, from the last 15 minutes, are given out.
+const codeTrust = new Set();   // hosts the owner said "always allow" for (this run only)
+function siteWord(host) { const parts = host.replace(/^www\./, '').split('.'); return (parts.length > 2 && parts[parts.length - 2].length <= 3 ? parts[parts.length - 3] : parts[parts.length - 2] || parts[0]).toLowerCase(); }
+function pickCode(t) {
+  const s = String(t || '');
+  const near = s.match(/(?:code|otp|pin|verif\w*|one[- ]time|passcode|kode|código)[^0-9A-Z]{0,40}([A-Z0-9]{0,3}-?\d{4,8}|\d{3}[ -]\d{3})/i);
+  if (near) return near[1].replace(/[ ]/g, '');
+  const g = s.match(/\bG-\d{6}\b/); if (g) return g[0];
+  const sp = s.match(/\b(\d{3})[ -](\d{3})\b/); if (sp) return sp[1] + sp[2];
+  const d = s.match(/(?<![\d$£€₦.,:])\b\d{4,8}\b(?![.,:]\d)/); return d ? d[0] : null;
+}
+async function gmailFeed() {
+  const ses = eSession.fromPartition('persist:main');
+  const all = [];
+  for (let u = 0; u < 4; u++) {
+    let xml = '';
+    try { const r = await ses.fetch(`https://mail.google.com/mail/u/${u}/feed/atom`, { redirect: 'follow' }); if (!r.ok) break; xml = await r.text(); } catch { break; }
+    if (!/<feed/.test(xml)) break;
+    const acct = (xml.match(/<title>Gmail - Inbox for ([^<]+)<\/title>/) || [])[1] || `account ${u}`;
+    if (all.some(e => e.account === acct)) break;   // Gmail falls back to account 0 when u is too high
+    const dec = x => String(x || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    for (const m of xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
+      const e = m[1], g = k => dec((e.match(new RegExp(`<${k}>([\\s\\S]*?)</${k}>`)) || [])[1]);
+      all.push({ account: acct, title: g('title'), summary: g('summary'), from: g('name') + ' <' + g('email') + '>', time: Date.parse(g('issued') || g('modified')) || 0 });
+    }
+  }
+  return all;
+}
+Object.assign(TOOLS, {
+  get_email_code: {
+    description: 'Get a sign-in / verification code that a site just emailed to the owner\'s Gmail, so you can type it into that site. Pass the tab where the code is asked for: only a fresh (last 15 min) email from that same site is used, and the owner approves sharing it. Ask the site to send the code to email first, then call this (it waits up to 60 s for the email to arrive). Type the code into the site and never repeat it anywhere else.',
+    schema: { from: { type: 'string', description: 'Optional: the sender name if it differs from the site (e.g. "TikTok" for a ByteDance site)' }, ...TAB },
+    run: async (a, client) => {
+      const { tab, wc } = await tabWC(a.tab);
+      let host = ''; try { host = new URL(wc.getURL()).hostname; } catch {}
+      if (!host || /(^|\.)(google\.com|gmail\.com)$/.test(host) && !a.from) throw new Error('Call this with the tab of the site that is asking for the code (not Gmail).');
+      const words = [siteWord(host), ...(a.from ? [String(a.from).toLowerCase()] : [])].filter(w => w && w.length > 1);
+      if (!codeTrust.has(host)) {
+        const r = await waitShort(prompt(client + ':code:' + host, 'ask', { client, question: `${client} is signing in to ${host} and wants the code that ${words.map(w => w[0].toUpperCase() + w.slice(1)).join(' / ')} emailed to your Gmail. Let it read that one code and type it in?`, options: ['Allow', `Always allow for ${host}`, 'No'] }));
+        if (r === WAITING) return text('Waiting for the owner to allow reading the code — call get_email_code again to keep waiting.');
+        const ans = String(r && r.answer || '');
+        if (!/^(allow|always)/i.test(ans)) return { content: [{ type: 'text', text: 'The owner did not allow reading the email code. Use ask_user so they can type it themselves.' }], isError: true };
+        if (/^always/i.test(ans)) codeTrust.add(host);
+      }
+      const until = Date.now() + 60000;
+      let seen = 0;
+      while (true) {
+        const feed = await gmailFeed();
+        if (!feed.length && !seen) { /* maybe signed out or empty */ }
+        seen = feed.length;
+        const fresh = feed.filter(e => Date.now() - e.time < 15 * 60000 && words.some(w => (e.from + ' ' + e.title).toLowerCase().includes(w))).sort((x, y) => y.time - x.time);
+        for (const e of fresh) {
+          const code = pickCode(e.title + ' ' + e.summary);
+          if (code) { notify({ type: 'log', text: `${client} read a sign-in code from ${e.from.replace(/<.*>/, '').trim()} (Gmail ${e.account})` }); return text({ code, from: e.from.replace(/<.*>/, '').trim(), subject: e.title, gmail: e.account, received_minutes_ago: Math.round((Date.now() - e.time) / 60000) }); }
+        }
+        if (fresh.length && Date.now() > until - 45000) return text({ code: null, note: `Found the email "${fresh[0].title}" from ${fresh[0].from} but the code is not in its preview. Open Gmail (https://mail.google.com) in a new tab, open that email, read_text to find the code, then type it back in tab ${tab.id}.` });
+        if (Date.now() > until) return text({ code: null, note: feed.length || seen ? `No unread email from ${words.join('/')} in the last 15 minutes yet. Make sure the site sent the code to email (press "Resend" if needed), then call again.` : 'Could not read Gmail — the owner may not be signed in to Gmail in this browser. Use ask_user.' });
+        await sleep(5000);
+      }
+    }
+  }
+});
+
 /* ---------------- helper agents: an AI can start more AIs, each in its own tab ---------------- */
 Object.assign(TOOLS, {
   start_helper: {
@@ -883,7 +949,7 @@ For bigger jobs, start with mission_start (goal + success criteria), prove each 
 Typical loop: snapshot -> click/type using the [ref] numbers or visible text -> snapshot again to check. If a click warns that a popup covered the target, close the popup first.
 Addresses ending in .mini (home.mini, chirp.mini, talk.mini, people.mini) are MiniNet Chat — a small local social feed and chat rooms. Everything else is the real web.
 Many AIs can work in this browser at the same time. Each AI gets its own tab: if another AI is busy in the tab you would use, you are given a new one automatically (list_tabs shows who works where). To do several jobs at once yourself, open several tabs and pass each tab id — tool calls on different tabs can run in parallel, so you can act as a team of agents.
-The owner's logins are kept in this browser: call list_accounts to see where they are already signed in. When a site offers "Continue with Google" / "Sign in with Google", use it and choose one of the owner's Google accounts. Never type passwords; if a password, a code from their phone or a captcha is needed, use ask_user so the owner does that part, then carry on in that signed-in tab.
+The owner's logins are kept in this browser: call list_accounts to see where they are already signed in. When a site offers "Continue with Google" / "Sign in with Google", use it and choose one of the owner's Google accounts. Never type passwords; if a password, a code from their phone or a captcha is needed, use ask_user so the owner does that part, then carry on in that signed-in tab. If a site sends a sign-in or verification code by EMAIL, choose "send code to email", then call get_email_code with that site's tab: it reads the code from the owner's Gmail (with their OK) and you type it in. Only use codes in the site that sent them.
 Content studio (the owner is signed in with Google): make images and videos in Google Flow (flow.google.com — type the idea in its "What do you want to create?" box; it uses the owner's free monthly credits and asks before spending them), download results to the Downloads folder, upload them into CapCut (capcut.com editor) with upload_file, edit there (drag trims/moves clips, Text, Captions, Audio, Effects), Export → Download saves the final video into Downloads. Uploading to YouTube/Instagram is publishing: confirm with the owner (ask_user) before the final Publish/Post.
 You can also create browser extensions with save_extension. You cannot change the browser's own code.`;
 

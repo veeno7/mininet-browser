@@ -496,6 +496,7 @@ ipcMain.handle('transcribe', async (e, { url, model, keyName, audio, mime }) => 
 /* ---------------- accounts: stay signed in, see which sites you're signed in to ---------------- */
 const SITES = [
   { id: 'google', name: 'Google (Gmail, YouTube, Drive…)', url: 'https://accounts.google.com/', login: 'https://accounts.google.com/ServiceLogin', domain: '.google.com', cookies: ['SID', '__Secure-1PSID'] },
+  { id: 'gmail', name: 'Gmail', url: 'https://mail.google.com/', login: 'https://accounts.google.com/ServiceLogin?service=mail&continue=https://mail.google.com/', domain: '.google.com', cookies: ['SID', '__Secure-1PSID'] },
   { id: 'youtube', name: 'YouTube', url: 'https://www.youtube.com/', login: 'https://www.youtube.com/signin', domain: '.youtube.com', cookies: ['LOGIN_INFO', 'SID'] },
   { id: 'capcut', name: 'CapCut', url: 'https://www.capcut.com/my-edit', login: 'https://www.capcut.com/login', domain: '.capcut.com', cookies: ['sessionid', 'sid_tt', 'sessionid_ss'] },
   { id: 'github', name: 'GitHub', url: 'https://github.com/', login: 'https://github.com/login', domain: 'github.com', cookies: ['logged_in=yes', 'user_session'] },

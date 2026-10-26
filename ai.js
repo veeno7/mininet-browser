@@ -252,7 +252,7 @@ async function ollamaPick() {
   } catch {}
 }
 const LOCAL_BRAINS = new Set(['ollama', 'lmstudio']);
-const LITE_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'snapshot', 'read_text', 'click', 'type', 'press_key', 'scroll', 'ask_user']);
+const LITE_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'snapshot', 'read_text', 'click', 'type', 'press_key', 'scroll', 'ask_user', 'get_email_code']);
 // Ask one brain (provider) for the next step
 async function callBrain(pk, cv, sysExtra = '', exclude = null) {
   const p = prov(pk), sys = (await systemPrompt(pk)) + (sysExtra ? '\n' + sysExtra : '');
