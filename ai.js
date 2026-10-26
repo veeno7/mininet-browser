@@ -178,7 +178,7 @@ ${orbit.instructions ? 'User\'s custom instructions: ' + orbit.instructions : ''
 function localPrompt() {
   // keep this text identical between steps so the local model can reuse its cache (no changing tab info here)
   return `You are Orbit, an assistant that uses the user's web browser with tools.
-Steps: open_tab or navigate to a site, snapshot to see numbered elements, click/type using ref numbers, read_text to read (read_text with find:"word" shows just the lines about that word). To search a site: type in its search box with submit:true, then read the results.
+Steps: open_tab or navigate to a site, snapshot to see numbered elements, click/type using ref numbers, read_text to read (read_text with find:"word" shows just the lines about that word). Your own tab is already open — use it; do not open new tabs. To search the web: navigate with url set to the search words (e.g. url:"1 dollar to naira"). To search inside a site: type in its search box with submit:true. After each move you get the start of the page text; use read_text with find for the rest.
 Rules: every fact in your answer (names, numbers, titles, prices) must be copied exactly from a tool result in this task — never from memory, never guessed. If you could not find it, say "I could not find it" and why.
 Do the whole task yourself, then answer in one or two short sentences.
 ${orbit.instructions ? 'User notes: ' + orbit.instructions : ''}`;
@@ -332,14 +332,16 @@ async function callModel(cv = convo, sysExtra = '', exclude = null) {
 // Which facts in an answer (numbers, "quoted" names, version numbers) never appeared in any tool result of this task
 function unverified(answer, cv) {
   const seen = cv.filter(m => m.role === 'tool').flatMap(m => m.results.map(r => contentText(r.content))).join('\n').toLowerCase().replace(/[,\u00a0]/g, '');
-  const task = cv.filter(m => m.role === 'user').map(m => m.text).join(' ').toLowerCase().replace(/,/g, '');
+  const task = String((cv.find(m => m.role === 'user') || {}).text || '').toLowerCase().replace(/,/g, '');
   const claims = new Set();
   for (const m of answer.matchAll(/["“]([^"”]{3,80})["”]/g)) claims.add(m[1].trim());
   for (const m of answer.matchAll(/\bv?\d[\d,]*(?:\.\d+)+\b|\b\d[\d,]{2,}\b/g)) claims.add(m[0]);
   return [...claims].filter(c => { const k = c.toLowerCase().replace(/,/g, ''); return !seen.includes(k) && !task.includes(k); }).slice(0, 5);
 }
+const READ_TOOLS = new Set(['read_text', 'snapshot', 'screenshot']);
+const MOVE_TOOLS = new Set(['navigate', 'open_tab', 'click', 'type', 'press_key', 'go_back', 'scroll']);
 async function runLoop(cv, { client = 'Orbit', owner, sysExtra = '', exclude = null, shouldStop = () => false, onPaint = () => {}, onStep = () => {}, onTrace = () => {} } = {}) {
-  let finalText = '', factChecked = false;
+  let finalText = '', factChecked = false, readSinceMove = true, nudges = 0;
   for (let step = 0; step < 80; step++) {
     if (shouldStop()) { cv.push({ role: 'error', text: 'Stopped.' }); break; }
     const res = await callModel(cv, sysExtra, exclude);
@@ -347,11 +349,16 @@ async function runLoop(cv, { client = 'Orbit', owner, sysExtra = '', exclude = n
     cv.push(msg); onPaint();
     if (res.text) finalText = res.text;
     if (!res.calls.length) {
+      if (!readSinceMove && nudges < 2 && cv.some(m => m.role === 'tool')) {
+        nudges++; onTrace({ check: 'answered without reading the page' });
+        cv.push({ role: 'user', text: 'You have not read the page since your last action. Call read_text now (use find:"<key word>" for long pages), then answer from what it shows.' });
+        continue;
+      }
       // fact check: numbers and quoted names in the answer must appear in something a tool actually returned
       const unseen = res.text ? unverified(res.text, cv) : [];
       if (unseen.length && !factChecked) {
         factChecked = true; onTrace({ check: 'unverified: ' + unseen.join(', ') });
-        cv.push({ role: 'user', text: `Check your answer: ${unseen.map(x => '"' + x + '"').join(', ')} did not appear in any page you read in this task. Read the page again (read_text with find) and answer only with what it actually shows — or say you could not find it.` });
+        cv.push({ role: 'user', text: `Check your answer: ${unseen.map(x => '"' + x + '"').join(', ')} did not appear in any page you read in this task. Do not answer yet: call read_text with find set to a key word from the task, look at what it returns, then answer only with what it shows. Only say you could not find it after you have looked.` });
         continue;
       }
       if (unseen.length) finalText = res.text + '\n\n⚠ Not confirmed on the page: ' + unseen.join(', ');
@@ -362,6 +369,17 @@ async function runLoop(cv, { client = 'Orbit', owner, sysExtra = '', exclude = n
       if (shouldStop()) { results.push({ id: c.id, name: c.name, content: [{ type: 'text', text: 'Stopped by user' }], isError: true }); c.status = 'err'; continue; }
       const r = await window.app.agentCall(c.name, c.args, client, owner);
       c.status = r.ok && !r.result.isError ? 'ok' : 'err';
+      if (READ_TOOLS.has(c.name) && c.status === 'ok') readSinceMove = true;
+      if (MOVE_TOOLS.has(c.name) && c.status === 'ok') {
+        readSinceMove = false;
+        // small local models often answer without looking: show them the page text right away
+        if (LOCAL_BRAINS.has(orbit.provider)) {
+          let tabId = c.args && c.args.tab; try { const j = JSON.parse(contentText(r.result.content)); tabId = j.opened || j.tab || tabId; } catch {}
+          await new Promise(z => setTimeout(z, 1500));
+          const look = await window.app.agentCall('read_text', { ...(tabId ? { tab: tabId } : {}), length: 1800 }, client, owner);
+          if (look.ok && !look.result.isError) { r.result.content = [...r.result.content, { type: 'text', text: '\nPage text now (start):\n' + contentText(look.result.content) }]; readSinceMove = true; }
+        }
+      }
       onTrace({ tool: c.name, args: JSON.stringify(c.args || {}).slice(0, 120), ok: c.status === 'ok', saw: (r.ok ? contentText(r.result.content) : 'Error: ' + r.error).replace(/\s+/g, ' ').slice(0, 160) });
       results.push({ id: c.id, name: c.name, content: r.ok ? r.result.content : [{ type: 'text', text: 'Error: ' + r.error }], isError: !r.ok });
       onStep(c); onPaint();
