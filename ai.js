@@ -581,6 +581,9 @@ function paintTunnel(t, token) {
     box.querySelectorAll('[data-prov]').forEach(b => b.onclick = async () => { tunEditing = b.dataset.prov === 'ngrok' && !t2.hasNgrokKey; paintTunnel(await window.app.tunnel('setup', { provider: b.dataset.prov })); });
     const o = $('#tunOpenNg'); if (o) o.onclick = () => newTab('https://dashboard.ngrok.com/get-started/your-authtoken');
     const d = $('#tunOpenDom'); if (d) d.onclick = () => newTab('https://dashboard.ngrok.com/domains');
+    const ps = $('#tunPaste'); if (ps) ps.onclick = async () => { const t = (await window.app.readClipboard() || '').trim(); if (!t) return toast('Nothing copied yet — copy the token on the ngrok page first'); $('#tunKey').value = t; toast('Pasted'); };
+    const gb = $('#tunGrab'); if (gb) gb.onclick = async () => { const r = await window.app.ngrokTokenFromPage(); if (r.token) { $('#tunKey').value = r.token; toast('Got your token from the ngrok page — now press Save'); } else toast(r.error); };
+    const ey = $('#tunEye'); if (ey) ey.onclick = () => { const k = $('#tunKey'); k.type = k.type === 'password' ? 'text' : 'password'; };
     const sv = $('#tunSave'); if (sv) sv.onclick = async () => {
       const key = $('#tunKey').value.trim(), dom = $('#tunDom').value.trim();
       if (!key && !t2.hasNgrokKey) return toast('Paste your ngrok authtoken first');
@@ -597,7 +600,8 @@ function paintTunnel(t, token) {
     box.innerHTML = tabs + `<small>One-time setup, about 1 minute. The link then <b>never changes</b> — paste it into your AI once and it keeps working every time this browser is open.</small>
       <ol style="margin:8px 0 8px 18px;padding:0;font-size:12.5px;line-height:1.6">
         <li>Make a free ngrok account and copy your <b>authtoken</b> — <a href="#" id="tunOpenNg">open ngrok</a></li>
-        <li>Paste it here:<input class="inp" id="tunKey" type="password" placeholder="${t2.hasNgrokKey ? 'saved ✓ — paste again to change' : 'ngrok authtoken'}"></li>
+        <li>Paste it here (or let MiniNet take it from the ngrok page):<input class="inp" id="tunKey" type="password" placeholder="${t2.hasNgrokKey ? 'saved ✓ — paste again to change' : 'ngrok authtoken'}">
+          <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" id="tunPaste">📋 Paste</button><button class="btn sm" id="tunGrab">✨ Use the token from my ngrok page</button><button class="btn sm" id="tunEye">👁 Show</button></div></li>
         <li>Your free permanent address (optional — leave blank to use the one ngrok gives your account): <a href="#" id="tunOpenDom">see my domain</a><input class="inp" id="tunDom" value="${esc(t2.domain || '')}" placeholder="something.ngrok-free.app"></li>
       </ol>
       ${t2.error ? `<small class="bad">${esc(t2.error)}</small>` : ''}

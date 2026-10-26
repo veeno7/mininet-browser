@@ -1,5 +1,5 @@
 // MiniNet Browser — main process
-const { app, BrowserWindow, session, ipcMain, Menu, shell, clipboard, dialog, safeStorage } = require('electron');
+const { app, BrowserWindow, session, ipcMain, Menu, shell, clipboard, dialog, safeStorage, webContents } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const agent = require('./agent');
@@ -53,7 +53,9 @@ ipcMain.on('agent-res', (e, { id, ok, result, error }) => {
 /* ---------------- sessions ---------------- */
 function setupSession() {
   const ses = session.fromPartition(PARTITION);
-  const ua = ses.getUserAgent().replace(/\sElectron\/\S+/, '').replace(/\smininet-browser\/\S+/i, '').replace(/\sMiniNet Browser\/\S+/i, '');
+  // a plain Chrome user agent: some sites (WhatsApp Web, banks) refuse browsers whose name they don't know
+  const plat = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
+  const ua = `Mozilla/5.0 (${plat}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
   ses.setUserAgent(ua);
   app.userAgentFallback = ua;
   // our own alert/confirm/prompt in every page frame (so pop-ups never freeze the page or an AI)
@@ -72,6 +74,7 @@ function setupSession() {
 
   const allow = ['notifications', 'media', 'fullscreen', 'clipboard-sanitized-write', 'clipboard-read', 'pointerLock', 'geolocation', 'speaker-selection'];
   ses.setPermissionRequestHandler((wc, perm, cb) => cb(allow.includes(perm)));
+  ses.setPermissionCheckHandler((wc, perm) => allow.includes(perm) || perm === 'clipboard-write' || perm === 'background-sync');
   session.defaultSession.setPermissionRequestHandler((wc, perm, cb) => cb(['media', 'clipboard-sanitized-write', 'speaker-selection'].includes(perm)));
 
   ses.on('will-download', (e, item) => {
@@ -96,6 +99,13 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), webviewTag: true, contextIsolation: true, nodeIntegration: false }
   });
   Menu.setApplicationMenu(null);
+  // right-click menu in the browser's own boxes (address bar, settings, AI control): cut / copy / paste
+  win.webContents.on('context-menu', (ev, p) => {
+    const t = [];
+    if (p.isEditable) t.push({ label: 'Cut', role: 'cut', enabled: p.editFlags.canCut }, { label: 'Copy', role: 'copy', enabled: p.editFlags.canCopy }, { label: 'Paste', role: 'paste' }, { type: 'separator' }, { label: 'Select all', role: 'selectAll' });
+    else if (p.selectionText) t.push({ label: 'Copy', role: 'copy' });
+    if (t.length) Menu.buildFromTemplate(t).popup({ window: win });
+  });
   win.loadFile('shell.html');
   win.on('maximize', () => win.webContents.send('win-state', 'max'));
   win.on('unmaximize', () => win.webContents.send('win-state', 'normal'));
@@ -504,6 +514,17 @@ async function accountsStatus() {
   return { sites: out, google };
 }
 ipcMain.handle('accounts', () => accountsStatus());
+// The owner presses "Use the token from the ngrok page": find it on their open ngrok dashboard tab
+ipcMain.handle('ngrok-token-from-page', async () => {
+  for (const wc of webContents.getAllWebContents()) {
+    if (wc.getType() !== 'webview' || !/^https:\/\/dashboard\.ngrok\.com\//.test(wc.getURL())) continue;
+    const t = await wc.executeJavaScript(`(() => { const txt = [document.body.innerText, ...[...document.querySelectorAll('input,textarea,code,pre')].map(e => e.value || e.textContent)].join(' '); const m = txt.match(/\\b[0-9][A-Za-z0-9]{20,40}_[A-Za-z0-9]{15,40}\\b/); return m ? m[0] : null; })()`).catch(() => null);
+    if (t) return { token: t };
+    return { error: 'The ngrok page is open but the token is hidden. Press the eye / "Show" button next to your Authtoken on that page, then try again.' };
+  }
+  return { error: 'Open your ngrok dashboard first (Your Authtoken page), then press this again.' };
+});
+ipcMain.handle('clipboard-read', () => clipboard.readText());
 ipcMain.handle('account-signout', async (e, id) => {
   const s = SITES.find(x => x.id === id); if (!s || s.storage) return false;
   const ses = session.fromPartition(PARTITION);
