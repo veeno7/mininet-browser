@@ -498,7 +498,7 @@ async function accountsStatus() {
     try {
       const r = await ses.fetch('https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard', { method: 'POST' });
       const t = await r.text(); const j = JSON.parse(t.replace(/^\)\]\}'/, ''));
-      google = (j[1] || []).map(a => ({ name: a[2] || '', email: a[3] || '', signedOut: !!a[9] })).filter(a => a.email && !a.signedOut);
+      google = (j[1] || []).map(a => ({ name: a[2] || '', email: a[3] || '', signedOut: !!a[14] })).filter(a => a.email && !a.signedOut);
     } catch {}
   }
   return { sites: out, google };
