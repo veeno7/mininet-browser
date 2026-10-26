@@ -48,6 +48,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const text = t => ({ content: [{ type: 'text', text: typeof t === 'string' ? t : JSON.stringify(t, null, 2) }] });
 
 async function tabWC(tab) {
+  if (tab != null && +tab > 1000) {   // a sign-in pop-up window
+    const p = popupsFn().find(x => x.id === +tab);
+    if (!p) throw new Error(`The pop-up window ${tab} is closed (sign-in pop-ups close themselves when done). Use list_tabs.`);
+    return { tab: p, wc: webContents.fromId(p.wcId) };
+  }
   const tabs = await shellReq('list');
   const t = tab == null ? tabs.find(x => x.active) : tabs.find(x => x.id === +tab);
   if (!t) throw new Error(tab == null ? 'No active tab' : `No tab with id ${tab}. Use list_tabs.`);
@@ -68,11 +73,12 @@ function js(wc, code) { return wc.executeJavaScript(code, true); }
 
 const SNAPSHOT_JS = (maxEl, maxText, start = 1) => `(() => {
   if (innerWidth < 5 || innerHeight < 5) return null;
-  document.querySelectorAll('[data-mn-ref]').forEach(e => e.removeAttribute('data-mn-ref'));
+  if (!window.__mnAll) { window.__mnAll = (sel, root = document) => { const out = [...root.querySelectorAll(sel)]; for (const h of root.querySelectorAll('*')) if (h.shadowRoot) out.push(...window.__mnAll(sel, h.shadowRoot)); return out; }; window.__mnQ = sel => { try { return document.querySelector(sel) || window.__mnAll(sel)[0] || null; } catch (e) { throw e; } }; window.__mnIn = (t, host) => { for (let n = t; n; n = n.parentNode || n.host) { if (n === host) return true; } return false; }; }
+  window.__mnAll('[data-mn-ref]').forEach(e => e.removeAttribute('data-mn-ref'));
   const sel = 'a[href],button,input:not([type=hidden]),textarea,select,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=option],[role=switch],[role=textbox],[role=combobox],[role=searchbox],[contenteditable=""],[contenteditable=true],[onclick],[tabindex]:not([tabindex="-1"])';
   const out = []; let n = ${start - 1}; const first = n;
   const vis = e => { const r = e.getBoundingClientRect(); if (r.width < 2 || r.height < 2) return false; const s = getComputedStyle(e); return s.visibility !== 'hidden' && s.display !== 'none' && +s.opacity !== 0; };
-  for (const e of document.querySelectorAll(sel)) {
+  for (const e of window.__mnAll(sel)) {
     if (n - first >= ${maxEl}) break;
     if (!vis(e)) continue;
     n++; e.setAttribute('data-mn-ref', n);
@@ -120,11 +126,12 @@ async function frameOffset(frame) {
 const LOCATE_JS = (ref, sel, label) => `(() => {
   let e = null, bs = 3;
   const ref = ${ref == null ? 'null' : +ref}, sel = ${JSON.stringify(sel || null)}, label = ${JSON.stringify(label || null)};
-  if (ref != null) e = document.querySelector('[data-mn-ref="' + ref + '"]');
-  else if (sel) { try { e = document.querySelector(sel); } catch (err) { return { error: 'Bad CSS selector: ' + err.message }; } }
+  if (!window.__mnAll) { window.__mnAll = (sel, root = document) => { const out = [...root.querySelectorAll(sel)]; for (const h of root.querySelectorAll('*')) if (h.shadowRoot) out.push(...window.__mnAll(sel, h.shadowRoot)); return out; }; window.__mnQ = sel => { try { return document.querySelector(sel) || window.__mnAll(sel)[0] || null; } catch (e) { throw e; } }; window.__mnIn = (t, host) => { for (let n = t; n; n = n.parentNode || n.host) { if (n === host) return true; } return false; }; }
+  if (ref != null) e = window.__mnQ('[data-mn-ref="' + ref + '"]');
+  else if (sel) { try { e = window.__mnQ(sel); } catch (err) { return { error: 'Bad CSS selector: ' + err.message }; } }
   else {
     const want = label.trim().toLowerCase();
-    const cands = [...document.querySelectorAll('a,button,input,textarea,select,summary,label,[role],[onclick],[tabindex],li,span,div,h1,h2,h3,h4,p,td')]
+    const cands = window.__mnAll('a,button,input,textarea,select,summary,label,[role],[onclick],[tabindex],li,span,div,h1,h2,h3,h4,p,td')
       .filter(el => { const b = el.getBoundingClientRect(); return b.width > 1 && b.height > 1 && getComputedStyle(el).visibility !== 'hidden'; });
     const txt = el => (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || '').trim().replace(/\\s+/g, ' ').toLowerCase();
     const score = el => { const t = txt(el); if (!t) return 0; if (t === want) return 3; if (t.startsWith(want)) return 2; if (t.includes(want)) return 1; return 0; };
@@ -133,7 +140,7 @@ const LOCATE_JS = (ref, sel, label) => `(() => {
     e = best && (best.closest('button,a,[role=button],[role=link],[role=menuitem],[role=tab],[role=checkbox],label,summary,[onclick]') || best);
   }
   if (!e) return null;
-  document.querySelectorAll('[data-mn-target]').forEach(x => x.removeAttribute('data-mn-target'));
+  window.__mnAll('[data-mn-target]').forEach(x => x.removeAttribute('data-mn-target'));
   e.setAttribute('data-mn-target', '1');
   e.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
   const host = e.closest('button,a,[role=button],[role=link],label,summary,[onclick]') || e;
@@ -144,9 +151,10 @@ const LOCATE_JS = (ref, sel, label) => `(() => {
   let hit = null, firstTop = null;
   for (const [x, y] of pts) {
     if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
-    const t = document.elementFromPoint(x, y);
+    let t = document.elementFromPoint(x, y);
+    while (t && t.shadowRoot) { const inner = t.shadowRoot.elementFromPoint(x, y); if (!inner || inner === t) break; t = inner; }
     if (!firstTop) firstTop = t;
-    if (t && (host.contains(t) || t.contains(host) && t === e)) { hit = [x, y]; break; }
+    if (t && (window.__mnIn(t, host) || window.__mnIn(host, t) && t === e)) { hit = [x, y]; break; }
   }
   let covered = null;
   if (!hit) {
@@ -179,7 +187,7 @@ async function pointFor(wc, { ref, selector, x, y, text: label }) {
 // Clicks inside embedded frames are performed from inside the frame (as a real user gesture),
 // because the engine does not route simulated mouse events into isolated frames.
 const FRAME_CLICK_JS = (count, right) => `(() => {
-  let e = document.querySelector('[data-mn-target]'); if (!e) return false;
+  let e = (window.__mnQ ? window.__mnQ('[data-mn-target]') : document.querySelector('[data-mn-target]')); if (!e) return false;
   const b = e.getBoundingClientRect(); const o = { bubbles: true, cancelable: true, view: window, clientX: b.left + b.width / 2, clientY: b.top + b.height / 2, button: ${right ? 2 : 0} };
   for (const t of ['pointerover', 'mouseover', 'pointerdown', 'mousedown']) e.dispatchEvent(new (t.startsWith('pointer') ? PointerEvent : MouseEvent)(t, o));
   if (typeof e.focus === 'function') e.focus();
@@ -219,7 +227,7 @@ const TAB = { tab: { type: 'integer', description: 'Tab id from list_tabs. Leave
 const TOOLS = {
   list_tabs: {
     description: 'List open tabs with their ids, titles and addresses. The active tab is marked.',
-    schema: {}, run: async () => text((await shellReq('list')).map(t => { const o = busyOwnerOf(t.id); return { id: t.id, active: t.active, title: t.title, url: displayUrl(t.url), loading: t.loading, ...(o ? { ai_working_here: o.client } : {}) }; }))
+    schema: {}, run: async () => text((await shellReq('list')).map(t => { const o = busyOwnerOf(t.id); return { id: t.id, active: t.active, title: t.title, url: displayUrl(t.url), loading: t.loading, ...(o ? { ai_working_here: o.client } : {}) }; }).concat(popupsFn().map(p => ({ id: p.id, title: p.title, url: p.url, loading: p.loading, popup_window: true }))))
   },
   open_tab: {
     description: 'Open a new tab. Accepts a web address (example.com), a search phrase, or a MiniNet Chat address (chirp.mini / talk.mini). Returns the new tab id.',
@@ -312,13 +320,13 @@ const TOOLS = {
       const { wc } = await tabWC(a.tab);
       if (a.ref != null || a.selector || a.field) {
         const p = await pointFor(wc, a.field && a.ref == null && !a.selector ? { text: a.field } : a);
-        const special = await fjs(p.frame, `(() => { let e = document.querySelector('[data-mn-target]'); if (e && e.tagName === 'LABEL' && e.control) e = e.control; if (!e || e.tagName !== 'INPUT') return false;
+        const special = await fjs(p.frame, `(() => { let e = (window.__mnQ ? window.__mnQ('[data-mn-target]') : document.querySelector('[data-mn-target]')); if (e && e.tagName === 'LABEL' && e.control) e = e.control; if (!e || e.tagName !== 'INPUT') return false;
           if (!/^(date|time|datetime-local|month|week|color|range)$/.test(e.type)) return false;
           const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(e, ${JSON.stringify(String(a.text))});
           e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); return e.type + '=' + e.value; })()`).catch(() => false);
         if (special) return text({ set: special, note: special.endsWith('=') ? 'The value was rejected — use the format the field expects, e.g. 19:30 for time or 2026-10-22 for date.' : undefined });
         if (p.inFrame) {
-          const ok = await fjs(p.frame, `(() => { let e = document.querySelector('[data-mn-target]'); if (e && e.tagName === 'LABEL' && e.control) e = e.control; if (!e) return false;
+          const ok = await fjs(p.frame, `(() => { let e = (window.__mnQ ? window.__mnQ('[data-mn-target]') : document.querySelector('[data-mn-target]')); if (e && e.tagName === 'LABEL' && e.control) e = e.control; if (!e) return false;
             e.focus(); ${a.append ? '' : "if ('value' in e && typeof e.select === 'function') e.select(); else document.execCommand('selectAll');"}
             if (!document.execCommand('insertText', false, ${JSON.stringify(String(a.text))})) { const proto = e.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; const d = Object.getOwnPropertyDescriptor(proto, 'value'); if (d) d.set.call(e, ${a.append ? "e.value + " : ""}${JSON.stringify(String(a.text))}); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); }
             return true; })()`);
@@ -329,7 +337,7 @@ const TOOLS = {
         await mouseClick(wc, p);
         await sleep(30);
         // make sure the click really put the cursor in that field (hidden/collapsed fields can't take typing)
-        const focusOk = await fjs(p.frame, `(() => { let t = document.querySelector('[data-mn-target]'); if (t && t.tagName === 'LABEL' && t.control) t = t.control; const f = document.activeElement; if (!t) return 'ok'; if (f && (f === t || t.contains(f) || f.contains(t))) return 'ok';
+        const focusOk = await fjs(p.frame, `(() => { let t = (window.__mnQ ? window.__mnQ('[data-mn-target]') : document.querySelector('[data-mn-target]')); if (t && t.tagName === 'LABEL' && t.control) t = t.control; let f = document.activeElement; while (f && f.shadowRoot && f.shadowRoot.activeElement) f = f.shadowRoot.activeElement; if (!t) return 'ok'; if (f && (f === t || t.contains(f) || f.contains(t))) return 'ok';
           const r = t.getBoundingClientRect(), cs = getComputedStyle(t); const hidden = !r.width || !r.height || cs.visibility === 'hidden' || cs.display === 'none' || +cs.opacity === 0;
           if (hidden) { t.focus(); if (document.activeElement === t) return 'focused-hidden'; return 'hidden'; } return 'covered:' + (f ? f.tagName.toLowerCase() + (f.id ? '#' + f.id : '') : 'nothing'); })()`).catch(() => 'ok');
         if (focusOk === 'hidden') throw new Error('That field exists but is hidden or collapsed, so it cannot be typed into yet. Click the button that opens it first (for example a search icon), then type again.');
@@ -347,6 +355,26 @@ const TOOLS = {
       return text({ typed: a.text.length + ' characters', submitted: !!a.submit, url: displayUrl(wc.getURL()) });
     }
   },
+  drag: {
+    description: 'Drag with the mouse: press on one thing and move it somewhere else before letting go — for moving clips on a video-editor timeline, trimming by pulling an edge, sliders, reordering lists or drag-and-drop. Start at a ref/text/selector or from_x/from_y; end at to_ref/to_selector, to_x/to_y, or move by dx/dy pixels.',
+    schema: { ref: { type: 'integer' }, text: { type: 'string' }, selector: { type: 'string' }, from_x: { type: 'number' }, from_y: { type: 'number' }, to_ref: { type: 'integer' }, to_selector: { type: 'string' }, to_x: { type: 'number' }, to_y: { type: 'number' }, dx: { type: 'number' }, dy: { type: 'number' }, steps: { type: 'integer', description: 'Move steps, default 12' }, ...TAB },
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      const p = await pointFor(wc, { ref: a.ref, selector: a.selector, text: a.text, x: a.from_x, y: a.from_y });
+      let q;
+      if (a.to_ref != null || a.to_selector) q = await pointFor(wc, { ref: a.to_ref, selector: a.to_selector });
+      else if (a.to_x != null && a.to_y != null) q = { x: +a.to_x, y: +a.to_y };
+      else q = { x: p.x + (+a.dx || 0), y: p.y + (+a.dy || 0) };
+      const x0 = Math.round(p.x), y0 = Math.round(p.y), x1 = Math.round(q.x), y1 = Math.round(q.y), n = Math.max(3, Math.min(60, +a.steps || 12));
+      wc.sendInputEvent({ type: 'mouseMove', x: x0, y: y0 }); await sleep(40);
+      wc.sendInputEvent({ type: 'mouseDown', x: x0, y: y0, button: 'left', clickCount: 1 }); await sleep(80);
+      for (let i = 1; i <= n; i++) { wc.sendInputEvent({ type: 'mouseMove', x: Math.round(x0 + (x1 - x0) * i / n), y: Math.round(y0 + (y1 - y0) * i / n), button: 'left', modifiers: ['leftButtonDown'] }); await sleep(25); }
+      await sleep(60);
+      wc.sendInputEvent({ type: 'mouseUp', x: x1, y: y1, button: 'left', clickCount: 1 });
+      await waitLoad(wc, 5000);
+      return text({ dragged: { from: [x0, y0], to: [x1, y1] }, url: displayUrl(wc.getURL()) });
+    }
+  },
   select_option: {
     description: 'Choose an option in a <select> dropdown by its visible text or value.',
     schema: { option: { type: 'string' }, ref: { type: 'integer' }, selector: { type: 'string' }, ...TAB }, required: ['option'],
@@ -355,8 +383,8 @@ const TOOLS = {
       const frames = a.ref != null ? [(refFrames.get(wc.id) || new Map()).get(+a.ref) || wc.mainFrame] : framesOf(wc);
       const q = a.ref != null ? `[data-mn-ref="${+a.ref}"]` : a.selector;
       let frame = frames[0];
-      for (const f of frames) { if (await fjs(f, `!!document.querySelector(${JSON.stringify(q)})`).catch(() => false)) { frame = f; break; } }
-      const r = await fjs(frame, `(() => { const s = document.querySelector(${JSON.stringify(q)}); if (!s || !s.options) return 'not a select';
+      for (const f of frames) { if (await fjs(f, `!!(window.__mnQ ? window.__mnQ(${JSON.stringify(q)}) : document.querySelector(${JSON.stringify(q)}))`).catch(() => false)) { frame = f; break; } }
+      const r = await fjs(frame, `(() => { const s = window.__mnQ ? window.__mnQ(${JSON.stringify(q)}) : document.querySelector(${JSON.stringify(q)}); if (!s || !s.options) return 'not a select';
         const o = [...s.options].find(o => o.text.trim() === ${JSON.stringify(a.option)} || o.value === ${JSON.stringify(a.option)}) || [...s.options].find(o => o.text.toLowerCase().includes(${JSON.stringify(a.option.toLowerCase())}));
         if (!o) return 'no such option. Options: ' + [...s.options].map(o => o.text.trim()).join(' | ');
         s.value = o.value; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); return 'selected ' + o.text.trim(); })()`);
@@ -512,7 +540,7 @@ const TOOLS = {
 let missionsDir = '';
 const missions = new Map();          // id -> mission
 const activeMission = new Map();     // client -> mission id
-const ACTION_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'go_forward', 'reload', 'click', 'type', 'select_option', 'press_key', 'scroll', 'hover', 'run_js', 'download', 'save_extension', 'toggle_extension', 'delete_extension', 'close_tab', 'close_other_tabs', 'switch_tab']);
+const ACTION_TOOLS = new Set(['drag', 'upload_file', 'open_tab', 'navigate', 'go_back', 'go_forward', 'reload', 'click', 'type', 'select_option', 'press_key', 'scroll', 'hover', 'run_js', 'download', 'save_extension', 'toggle_extension', 'delete_extension', 'close_tab', 'close_other_tabs', 'switch_tab']);
 const SHOT_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'go_forward', 'click', 'type', 'select_option', 'press_key']);
 function missionInit(userData) {
   missionsDir = path.join(userData, 'missions');
@@ -820,7 +848,8 @@ async function call(name, args = {}, client = 'AI agent', ownerKey) {
     else claim(key, client, +args.tab);
   }
   if (name === 'open_tab' && args.background == null && anotherBusy(key)) args.background = true;
-  if (args.tab != null) shellReq('follow', { id: +args.tab }).catch(() => {});
+  if (args.tab != null && +args.tab < 1000) shellReq('follow', { id: +args.tab }).catch(() => {});
+  const popsBefore = new Set(popupsFn().map(p => p.id));
   const entry = { t: Date.now(), client, tool: name, summary: summarize(name, args || {}), ok: null };
   log.unshift(entry); if (log.length > 200) log.pop();
   notify({ type: 'activity', ...entry, status: 'start' });
@@ -832,10 +861,16 @@ async function call(name, args = {}, client = 'AI agent', ownerKey) {
     if (name === 'open_tab') { try { const id = JSON.parse(r.content[0].text).opened; if (id) { claim(key, client, id); shellReq('follow', { id }).catch(() => {}); } } catch {} }
     if (name === 'switch_tab') claim(key, client, +args.tab);
     if (args.tab != null && dialogLog.has(+args.tab)) { note = (note ? note + ' ' : '') + dialogLog.get(+args.tab).join('; ') + '. (Use answer_dialog first to choose Cancel or a different answer.)'; dialogLog.delete(+args.tab); }
+    const newPops = popupsFn().filter(p => !popsBefore.has(p.id));
+    if (newPops.length) note = (note ? note + ' ' : '') + newPops.map(p => `A pop-up window opened (tab ${p.id}: ${p.title || p.url}) — usually a sign-in window. Work in it by passing tab ${p.id}; it closes itself when the sign-in is done.`).join(' ');
     if (note && r && r.content) r = { ...r, content: [...r.content, { type: 'text', text: 'Note: ' + note }] };
     entry.ok = true; notify({ type: 'activity', ...entry, status: 'done' });
     return r;
   } catch (e) {
+    if (args && +args.tab > 1000 && /destroyed/i.test(e.message)) {   // the sign-in pop-up closed itself after the click
+      entry.ok = true; notify({ type: 'activity', ...entry, status: 'done' });
+      return text('Done — the pop-up window closed itself, which usually means the sign-in finished. Continue in the original tab (snapshot it to check).');
+    }
     entry.ok = false; entry.error = e.message; notify({ type: 'activity', ...entry, status: 'error' });
     throw e;
   }
@@ -976,9 +1011,9 @@ function start() {
 function stop() { if (server) { server.close(); server = null; } }
 function restart() { stop(); start(); }
 
-let accountsFn = null;
-function init({ userData, shell, onEvent, accounts }) {
-  shellReq = shell; notify = onEvent || notify; accountsFn = accounts || null;
+let accountsFn = null, popupsFn = () => [];
+function init({ userData, shell, onEvent, accounts, popups }) {
+  shellReq = shell; notify = onEvent || notify; accountsFn = accounts || null; if (popups) popupsFn = popups;
   loadConfig(userData);
   missionInit(userData);
   start();

@@ -117,6 +117,17 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 }
 
+/* ---------------- sign-in pop-up windows (AIs can see and click them as tabs 1001, 1002 …) ---------------- */
+const popups = new Map(); let popupSeq = 1000;
+function registerPopup(pw) {
+  const id = ++popupSeq; popups.set(id, pw);
+  try { pw.setMenu(null); } catch {}
+  pw.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  pw.on('closed', () => popups.delete(id));
+  win && win.webContents.send('agent-event', { type: 'popup', id });
+}
+function popupList() { return [...popups.entries()].filter(([, w]) => !w.isDestroyed()).map(([id, w]) => ({ id, wcId: w.webContents.id, url: w.webContents.getURL(), title: w.webContents.getTitle() || 'Sign-in window', active: false, loading: w.webContents.isLoading(), popup: true })); }
+
 /* ---------------- page views (tabs) ---------------- */
 const SHORTCUT_KEYS = new Set(['t', 'w', 'l', 'r', 'd', 'h', 'j', 'f', 'Tab', '=', '+', '-', '0', 'n', 'T', 'p', 'k', 'K']);
 function injectExtensions(wc) {
@@ -139,10 +150,16 @@ app.on('web-contents-created', (e, wc) => {
     if (/^file:/i.test(url) && !url.startsWith(fileBase())) ev.preventDefault();
   });
 
-  wc.setWindowOpenHandler(({ url }) => {
+  wc.setWindowOpenHandler(({ url, disposition, features }) => {
+    // Sign-in pop-ups ("Continue with Google / Facebook / Apple") must stay real pop-up windows so the site gets the answer back
+    const signIn = /^about:blank|^https:\/\/(accounts\.google\.com|www\.facebook\.com\/(v\d+\.\d+\/)?dialog|appleid\.apple\.com|login\.microsoftonline\.com|login\.live\.com|github\.com\/login|api\.twitter\.com|x\.com\/i\/oauth|www\.tiktok\.com\/(auth|login)|discord\.com\/oauth2)/i.test(url || '');
+    if (disposition === 'new-window' || signIn || /width|height|popup/i.test(features || '')) {
+      return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, parent: win || undefined, autoHideMenuBar: true, backgroundColor: '#ffffff', title: 'Sign in', webPreferences: { partition: PARTITION, contextIsolation: true, sandbox: true } } };
+    }
     if (win) win.webContents.send('open-tab', url);
     return { action: 'deny' };
   });
+  wc.on('did-create-window', (pw) => registerPopup(pw));
 
   wc.on('before-input-event', (ev, input) => {
     if (input.type !== 'keyDown' || !win) return;
@@ -575,7 +592,8 @@ app.whenReady().then(async () => {
     userData: app.getPath('userData'),
     shell: shellReq,
     onEvent: ev => win && win.webContents.send('agent-event', ev),
-    accounts: () => accountsStatus()
+    accounts: () => accountsStatus(),
+    popups: () => popupList()
   });
   if (tunnelConf().on) setTimeout(() => { tunnelLog('auto-start ' + tunnelConf().provider); tunnelStart(); }, 3000);   // reopen the connector link if it was on
 });
