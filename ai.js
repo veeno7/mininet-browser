@@ -129,7 +129,7 @@ function paintConvo() {
   const box = $('#oMsgs'); if (!box) return;
   if (!convo.length) {
     box.innerHTML = `<div class="oHello"><img src="icon.png"><b>Hi, I'm Orbit</b>I can browse, click, type, shop, post and build for you — on the real web and inside MiniNet.
-      <div class="chips">${['💡 Brainstorm ways I could earn online with my skills, research which are real today, and tell me which you can set up for me in this browser', 'Summarize this page', 'Find the top story on Hacker News and summarize it', 'Search YouTube for afrobeats mixes', 'Build an extension that adds a dark mode to every site'].map(c => `<span class="chip">${c}</span>`).join('')}</div></div>`;
+      <div class="chips">${['🎬 Make a short video: create an image in Google Flow, turn it into a video, then edit it in CapCut with a title and save it to my Downloads', '💡 Brainstorm ways I could earn online with my skills, research which are real today, and tell me which you can set up for me in this browser', 'Summarize this page', 'Find the top story on Hacker News and summarize it', 'Search YouTube for afrobeats mixes', 'Build an extension that adds a dark mode to every site'].map(c => `<span class="chip">${c}</span>`).join('')}</div></div>`;
     box.querySelectorAll('.chip').forEach(c => c.onclick = () => { $('#oText').value = c.textContent; sendOrbit(); });
     return;
   }

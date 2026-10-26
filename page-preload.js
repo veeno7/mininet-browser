@@ -9,6 +9,9 @@ const patch = (a) => {
   const fix = (n, f) => { try { Object.defineProperty(window, n, { value: f, writable: true, configurable: true }); } catch {} };
   fix('alert', function alert(m) { a('alert', m); });
   fix('confirm', function confirm(m) { return !!a('confirm', m); });
+  // FedCM ("Sign in with Google" without a pop-up) isn't available in this browser; hiding it makes sites use the normal pop-up sign-in
+  try { delete window.IdentityCredential; } catch {}
+  try { delete window.IdentityProvider; } catch {}
   fix('prompt', function prompt(m, d) { const r = a('prompt', m, d); return r == null ? null : String(r); });
 };
 try {

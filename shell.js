@@ -28,6 +28,7 @@ let sideSites = load('sideSites', [
   { url: 'https://x.com/', title: 'X' }
 ]);
 // pin the creator & social apps once (CapCut, Instagram, Facebook, GitHub)
+if (!load('sideV3', false)) { [['https://flow.google.com/', 'Google Flow']].forEach(([url, title]) => { if (!sideSites.some(s => s.title === title)) sideSites.push({ url, title }); }); store('sideSites', sideSites); store('sideV3', true); }
 if (!load('sideV2', false)) { [['https://www.capcut.com/my-edit', 'CapCut'], ['https://www.instagram.com/', 'Instagram'], ['https://www.facebook.com/', 'Facebook'], ['https://github.com/', 'GitHub']].forEach(([url, title]) => { if (!sideSites.some(s => s.title === title)) sideSites.push({ url, title }); }); store('sideSites', sideSites); store('sideV2', true); }
 let history = load('history', []);
 let downloads = load('downloads', []);
@@ -579,11 +580,12 @@ function followAI(id) {
   if (!settings.followAI) return;
   const t = tabs.find(x => x.id === id); if (!t) return;
   const busy = workingTabs();
-  if (busy.length >= 2) { if (!teamView) { teamView = true; autoTeam = true; paintTeam(); } }
+  const agentsBusy = new Set(busy.map(x => x.agent)).size;   // one AI using several tabs is not a team — only switch to Team view for 2+ different AIs
+  if (agentsBusy >= 2) { if (!teamView) { teamView = true; autoTeam = true; paintTeam(); } }
   else if (!teamView && active !== t && Date.now() - lastHuman > 4000) activate(t);
   labelTiles();
 }
-setInterval(() => { if (autoTeam && teamView && workingTabs().length < 2 && Date.now() - lastHuman > 4000) { teamView = false; autoTeam = false; paintTeam(); const w = workingTabs()[0]; if (w && settings.followAI) activate(w); } labelTiles(); }, 3000);
+setInterval(() => { if (autoTeam && teamView && new Set(workingTabs().map(x => x.agent)).size < 2 && Date.now() - lastHuman > 4000) { teamView = false; autoTeam = false; paintTeam(); const w = workingTabs()[0]; if (w && settings.followAI) activate(w); } labelTiles(); }, 3000);
 function labelTiles() {
   document.querySelectorAll('#views .tilelbl').forEach(x => x.remove());
   if (!teamView) return;

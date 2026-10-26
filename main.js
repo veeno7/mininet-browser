@@ -504,6 +504,7 @@ const SITES = [
   { id: 'tiktok', name: 'TikTok', url: 'https://www.tiktok.com/', login: 'https://www.tiktok.com/login', domain: '.tiktok.com', cookies: ['sessionid', 'sid_tt'] },
   { id: 'x', name: 'X (Twitter)', url: 'https://x.com/home', login: 'https://x.com/i/flow/login', domain: '.x.com', cookies: ['auth_token'] },
   { id: 'linkedin', name: 'LinkedIn', url: 'https://www.linkedin.com/feed/', login: 'https://www.linkedin.com/login', domain: '.linkedin.com', cookies: ['li_at'] },
+  { id: 'flow', name: 'Google Flow (AI video & images)', url: 'https://flow.google.com/', login: 'https://flow.google.com/', domain: '.google.com', cookies: ['SID', '__Secure-1PSID'] },
   { id: 'whatsapp', name: 'WhatsApp Web', url: 'https://web.whatsapp.com/', login: 'https://web.whatsapp.com/', domain: 'web.whatsapp.com', cookies: [], storage: true }
 ];
 async function accountsStatus() {
