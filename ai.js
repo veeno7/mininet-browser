@@ -85,7 +85,10 @@ function prov(pk = orbit.provider) { return PROVIDERS[pk] || PROVIDERS.ollama; }
 function modelName(pk = orbit.provider) { return orbit.models[pk] || prov(pk).model; }
 function provUrl(pk = orbit.provider) { return orbit.urls[pk] || prov(pk).url; }
 
-let convo = [];          // neutral format: {role:'user',text} | {role:'assistant',text,calls:[]} | {role:'tool',results:[]}
+let convo = load('orbitChat', []);   // the chat survives closing the browser (pictures are left out to keep it small)
+let saveChatT = 0;
+function saveChat() { clearTimeout(saveChatT); saveChatT = setTimeout(() => { try { const slim = convo.slice(-80).map(m => m.role !== 'tool' ? m : { ...m, results: m.results.map(r => ({ ...r, content: r.content.map(c => c.type === 'image' ? { type: 'text', text: '[screenshot]' } : { ...c, text: String(c.text || '').slice(0, 4000) }) })) }); store('orbitChat', slim); } catch {} }, 400); }
+let _unused = [];          // neutral format: {role:'user',text} | {role:'assistant',text,calls:[]} | {role:'tool',results:[]}
 let running = false, abortFlag = false, toolDefs = null;
 function orbitAbort() { abortFlag = true; }
 
@@ -122,10 +125,11 @@ function mdLite(s) {
     .replace(/(https?:\/\/[^\s<)]+)/g, '<a data-href="$1">$1</a>').replace(/\n/g, '<br>');
 }
 function paintConvo() {
+  saveChat();
   const box = $('#oMsgs'); if (!box) return;
   if (!convo.length) {
     box.innerHTML = `<div class="oHello"><img src="icon.png"><b>Hi, I'm Orbit</b>I can browse, click, type, shop, post and build for you — on the real web and inside MiniNet.
-      <div class="chips">${['Summarize this page', 'Post a chirp on MiniNet saying hello', 'Find the top story on Hacker News and summarize it', 'Build an extension that adds a dark mode to every site', 'Search YouTube for afrobeats mixes'].map(c => `<span class="chip">${c}</span>`).join('')}</div></div>`;
+      <div class="chips">${['💡 Brainstorm ways I could earn online with my skills, research which are real today, and tell me which you can set up for me in this browser', 'Summarize this page', 'Find the top story on Hacker News and summarize it', 'Search YouTube for afrobeats mixes', 'Build an extension that adds a dark mode to every site'].map(c => `<span class="chip">${c}</span>`).join('')}</div></div>`;
     box.querySelectorAll('.chip').forEach(c => c.onclick = () => { $('#oText').value = c.textContent; sendOrbit(); });
     return;
   }
@@ -720,3 +724,25 @@ window.app.on('page-dialog', d => {
       if (inp) { inp.onkeydown = e => { if (e.key === 'Enter') ok(); }; setTimeout(() => { inp.focus(); inp.select(); }, 30); }
     }).then(v => window.app.pageDialogAnswer(d.id, v));
 });
+
+
+/* ================= Accounts: sign in once, stay signed in ================= */
+PANELS.accounts = { title: 'Accounts', render: renderAccounts };
+async function renderAccounts(body) {
+  body.className = '';
+  body.innerHTML = '<small style="padding:14px;display:block">Checking your sign-ins…</small>';
+  const a = await window.app.accounts();
+  body.innerHTML = `
+    <div class="set"><b>Sign in once — stay signed in</b><small>Sign in to a site one time in MiniNet Browser and you stay signed in, even after closing it. Sites with <b>Continue with Google</b> then take one click — for you and for your AIs (they choose your Google account, and never type passwords).</small></div>
+    <div class="set"><b>Google accounts</b>
+      ${a.google.length ? a.google.map(g => `<div class="pi"><img src="https://www.google.com/s2/favicons?sz=64&domain=google.com"><div class="tx"><div>${esc(g.email)}</div><small>${esc(g.name || '')}</small></div><span class="ok">● signed in</span></div>`).join('') : '<small>No Google account yet.</small>'}
+      <button class="btn sun wide" id="acAddG" style="margin-top:8px">${a.google.length ? '+ Add another Google account' : 'Sign in with Google'}</button></div>
+    <div class="set"><b>Sites</b>
+      ${a.sites.filter(s => s.id !== 'google').map(s => `<div class="pi"><img src="https://www.google.com/s2/favicons?sz=64&domain=${esc(new URL(s.url).hostname)}"><div class="tx"><div>${esc(s.name)}</div><small>${s.signedIn ? '<span class="ok">● signed in</span>' : 'not signed in'}</small></div>
+        ${s.signedIn ? `<button class="btn sm" data-open="${esc(s.url)}">Open</button>${s.id !== 'whatsapp' ? ` <button class="btn sm" data-out="${esc(s.id)}" title="Sign out of ${esc(s.name)} in this browser">Sign out</button>` : ''}` : `<button class="btn sun sm" data-open="${esc(s.login)}">Sign in</button>`}</div>`).join('')}
+      <button class="btn wide" id="acRe" style="margin-top:8px">Refresh</button></div>`;
+  $('#acAddG').onclick = () => newTab(a.google.length ? 'https://accounts.google.com/AddSession' : 'https://accounts.google.com/ServiceLogin');
+  $('#acRe').onclick = () => renderAccounts(body);
+  body.querySelectorAll('[data-open]').forEach(b => b.onclick = () => newTab(b.dataset.open));
+  body.querySelectorAll('[data-out]').forEach(b => b.onclick = async () => { if (!confirm('Sign out of this site in MiniNet Browser?')) return; await window.app.accountSignout(b.dataset.out); toast('Signed out'); renderAccounts(body); });
+}

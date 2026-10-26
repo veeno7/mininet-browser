@@ -268,7 +268,18 @@ function tunnelConf(patch) {
   return c;
 }
 function tunnelLog(line) { try { const f = path.join(app.getPath('userData'), 'tunnel.log'); fs.appendFileSync(f, new Date().toISOString() + ' ' + String(line).slice(0, 500) + '\n'); if (fs.statSync(f).size > 200000) fs.writeFileSync(f, ''); } catch {} }
-function tunnelState() { const c = tunnelConf(); return { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress, provider: c.provider, domain: c.domain, hasNgrokKey: !!readSecrets().ngrok }; }
+// The ngrok key also lives in its own encrypted file, so the permanent link survives even if the main key store has a problem
+function ngrokKeyFile() { return path.join(app.getPath('userData'), 'link-key.bin'); }
+function getNgrokKey() {
+  const k = readSecrets().ngrok; if (k) { if (!fs.existsSync(ngrokKeyFile())) try { setNgrokKey(k); } catch {} return k; }
+  try { const b = fs.readFileSync(ngrokKeyFile()); const v = safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(b) : b.toString('utf8'); if (v) { try { const s = readSecrets(true); s.ngrok = v; writeSecrets(s); } catch {} return v; } } catch {}
+  return null;
+}
+function setNgrokKey(v) {
+  if (v) fs.writeFileSync(ngrokKeyFile(), safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(v) : Buffer.from(v));
+  else { try { fs.unlinkSync(ngrokKeyFile()); } catch {} }
+}
+function tunnelState() { const c = tunnelConf(); return { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress, provider: c.provider, domain: c.domain, hasNgrokKey: !!getNgrokKey() }; }
 function tunnelEmit() { agent.setPublicUrl(tunnel.status === 'on' ? tunnel.url : null); win && !win.isDestroyed() && win.webContents.send('tunnel', tunnelState()); }
 function binPath(name) { return path.join(app.getPath('userData'), 'bin', process.platform === 'win32' ? name + '.exe' : name); }
 async function downloadTo(url, file) {
@@ -322,7 +333,7 @@ async function tunnelStart() {
   try {
     let p;
     if (conf.provider === 'ngrok') {
-      const key = readSecrets().ngrok;
+      const key = getNgrokKey();
       if (!key) throw new Error('Paste your free ngrok authtoken first.');
       const exe = await ensureNgrok();
       tunnel.status = 'starting'; tunnelEmit();
@@ -376,7 +387,7 @@ ipcMain.handle('tunnel', async (e, op, opts = {}) => {
     const patch = {};
     if (opts.provider === 'ngrok' || opts.provider === 'cloudflare') patch.provider = opts.provider;
     if (opts.domain !== undefined) patch.domain = cleanDomain(opts.domain);
-    if (opts.ngrokKey !== undefined) { const s = readSecrets(true); if (opts.ngrokKey) s.ngrok = String(opts.ngrokKey).trim(); else delete s.ngrok; writeSecrets(s); }
+    if (opts.ngrokKey !== undefined) { const v = opts.ngrokKey ? String(opts.ngrokKey).trim() : ''; setNgrokKey(v); const s = readSecrets(true); if (v) s.ngrok = v; else delete s.ngrok; writeSecrets(s); }
     const was = tunnelConf(); tunnelConf(patch);
     if (tunnel.proc && (patch.provider && patch.provider !== was.provider || patch.domain !== undefined || opts.ngrokKey)) { tunnelStop(); tunnelConf({ on: true }); tunnelStart(); }
   }
@@ -455,16 +466,95 @@ ipcMain.handle('transcribe', async (e, { url, model, keyName, audio, mime }) => 
   } catch (err) { return { ok: false, error: err.message }; }
 });
 
+/* ---------------- accounts: stay signed in, see which sites you're signed in to ---------------- */
+const SITES = [
+  { id: 'google', name: 'Google (Gmail, YouTube, Drive…)', url: 'https://accounts.google.com/', login: 'https://accounts.google.com/ServiceLogin', domain: '.google.com', cookies: ['SID', '__Secure-1PSID'] },
+  { id: 'youtube', name: 'YouTube', url: 'https://www.youtube.com/', login: 'https://www.youtube.com/signin', domain: '.youtube.com', cookies: ['LOGIN_INFO', 'SID'] },
+  { id: 'capcut', name: 'CapCut', url: 'https://www.capcut.com/my-edit', login: 'https://www.capcut.com/login', domain: '.capcut.com', cookies: ['sessionid', 'sid_tt', 'sessionid_ss'] },
+  { id: 'github', name: 'GitHub', url: 'https://github.com/', login: 'https://github.com/login', domain: 'github.com', cookies: ['logged_in=yes', 'user_session'] },
+  { id: 'instagram', name: 'Instagram', url: 'https://www.instagram.com/', login: 'https://www.instagram.com/accounts/login/', domain: '.instagram.com', cookies: ['sessionid'] },
+  { id: 'facebook', name: 'Facebook', url: 'https://www.facebook.com/', login: 'https://www.facebook.com/login', domain: '.facebook.com', cookies: ['c_user'] },
+  { id: 'tiktok', name: 'TikTok', url: 'https://www.tiktok.com/', login: 'https://www.tiktok.com/login', domain: '.tiktok.com', cookies: ['sessionid', 'sid_tt'] },
+  { id: 'x', name: 'X (Twitter)', url: 'https://x.com/home', login: 'https://x.com/i/flow/login', domain: '.x.com', cookies: ['auth_token'] },
+  { id: 'linkedin', name: 'LinkedIn', url: 'https://www.linkedin.com/feed/', login: 'https://www.linkedin.com/login', domain: '.linkedin.com', cookies: ['li_at'] },
+  { id: 'whatsapp', name: 'WhatsApp Web', url: 'https://web.whatsapp.com/', login: 'https://web.whatsapp.com/', domain: 'web.whatsapp.com', cookies: [], storage: true }
+];
+async function accountsStatus() {
+  const ses = session.fromPartition(PARTITION);
+  const out = [];
+  for (const s of SITES) {
+    let signedIn = false;
+    if (s.storage) {
+      // WhatsApp keeps its login in site storage, not cookies
+      try { signedIn = fs.existsSync(path.join(app.getPath('userData'), 'Partitions', 'main', 'IndexedDB', 'https_web.whatsapp.com_0.indexeddb.leveldb')); } catch {}
+    } else {
+      const list = await ses.cookies.get({ domain: s.domain.replace(/^\./, '') }).catch(() => []);
+      signedIn = s.cookies.some(c => { const [n, v] = c.split('='); return list.some(k => k.name === n && (!v || k.value === v) && k.value); });
+    }
+    out.push({ id: s.id, name: s.name, url: s.url, login: s.login, signedIn });
+  }
+  let google = [];
+  if (out[0].signedIn) {
+    try {
+      const r = await ses.fetch('https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard', { method: 'POST' });
+      const t = await r.text(); const j = JSON.parse(t.replace(/^\)\]\}'/, ''));
+      google = (j[1] || []).map(a => ({ name: a[2] || '', email: a[3] || '', signedOut: !!a[9] })).filter(a => a.email && !a.signedOut);
+    } catch {}
+  }
+  return { sites: out, google };
+}
+ipcMain.handle('accounts', () => accountsStatus());
+ipcMain.handle('account-signout', async (e, id) => {
+  const s = SITES.find(x => x.id === id); if (!s || s.storage) return false;
+  const ses = session.fromPartition(PARTITION);
+  const list = await ses.cookies.get({ domain: s.domain.replace(/^\./, '') });
+  for (const c of list) await ses.cookies.remove((c.secure ? 'https://' : 'http://') + c.domain.replace(/^\./, '') + c.path, c.name).catch(() => {});
+  return true;
+});
+
+// "Keep me signed in": sites that use session-only cookies would sign you out every time the browser closes.
+// Save them (encrypted) when the browser closes and put them back when it opens.
+function keepFile() { return path.join(app.getPath('userData'), 'kept-sessions.bin'); }
+async function saveSessionCookies() {
+  try {
+    const ses = session.fromPartition(PARTITION);
+    await ses.cookies.flushStore();
+    const all = (await ses.cookies.get({})).filter(c => c.session && c.value && c.value.length < 4096).slice(0, 3000);
+    const json = JSON.stringify({ t: Date.now(), cookies: all });
+    fs.writeFileSync(keepFile(), safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(json) : Buffer.from(json));
+  } catch (e) { console.error('keep sessions', e.message); }
+}
+async function restoreSessionCookies() {
+  try {
+    const buf = fs.readFileSync(keepFile());
+    const { t, cookies } = JSON.parse(safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buf) : buf.toString('utf8'));
+    if (Date.now() - t > 30 * 864e5) return;   // older than 30 days: let them go
+    const ses = session.fromPartition(PARTITION);
+    for (const c of cookies) {
+      const host = c.domain.replace(/^\./, '');
+      const d = { url: (c.secure ? 'https://' : 'http://') + host + (c.path || '/'), name: c.name, value: c.value, path: c.path, secure: c.secure, httpOnly: c.httpOnly, sameSite: c.sameSite, expirationDate: Date.now() / 1000 + 14 * 86400 };
+      if (c.domain.startsWith('.')) d.domain = c.domain;
+      if (c.name.startsWith('__Host-')) delete d.domain;
+      await ses.cookies.set(d).catch(() => {});
+    }
+  } catch {}
+}
+let savedOnQuit = false;
+app.on('before-quit', e => { if (savedOnQuit) return; e.preventDefault(); savedOnQuit = true; saveSessionCookies().finally(() => app.quit()); });
+setInterval(saveSessionCookies, 5 * 60 * 1000).unref?.();   // also every 5 minutes, in case the laptop switches off
+
 /* ---------------- start ---------------- */
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   setupSession();
+  await restoreSessionCookies();
   ext.init(app.getPath('userData'));
   try { writeBridge(); } catch (err) { console.error('bridge', err); }
   createWindow();
   agent.init({
     userData: app.getPath('userData'),
     shell: shellReq,
-    onEvent: ev => win && win.webContents.send('agent-event', ev)
+    onEvent: ev => win && win.webContents.send('agent-event', ev),
+    accounts: () => accountsStatus()
   });
   if (tunnelConf().on) setTimeout(() => { tunnelLog('auto-start ' + tunnelConf().provider); tunnelStart(); }, 3000);   // reopen the connector link if it was on
 });

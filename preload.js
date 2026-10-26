@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('app', {
   agentRespond: (msg) => ipcRenderer.send('agent-res', msg),
   agentTools: () => ipcRenderer.invoke('agent-tools'),
   agentCall: (name, args, client, owner) => ipcRenderer.invoke('agent-call', { name, args, client, owner }),
+  accounts: () => ipcRenderer.invoke('accounts'),
+  accountSignout: (id) => ipcRenderer.invoke('account-signout', id),
   agentRelease: (key) => ipcRenderer.invoke('agent-release', key),
   pageDialogAnswer: (id, value) => ipcRenderer.send('page-dialog-answer', { id, value }),
   agentConfig: (c) => ipcRenderer.invoke('agent-config', c),

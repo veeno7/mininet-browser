@@ -27,6 +27,8 @@ let sideSites = load('sideSites', [
   { url: 'https://mail.google.com/', title: 'Gmail' },
   { url: 'https://x.com/', title: 'X' }
 ]);
+// pin the creator & social apps once (CapCut, Instagram, Facebook, GitHub)
+if (!load('sideV2', false)) { [['https://www.capcut.com/my-edit', 'CapCut'], ['https://www.instagram.com/', 'Instagram'], ['https://www.facebook.com/', 'Facebook'], ['https://github.com/', 'GitHub']].forEach(([url, title]) => { if (!sideSites.some(s => s.title === title)) sideSites.push({ url, title }); }); store('sideSites', sideSites); store('sideV2', true); }
 let history = load('history', []);
 let downloads = load('downloads', []);
 const blocked = { ad: 0, data: 0 };

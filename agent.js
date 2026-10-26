@@ -673,6 +673,10 @@ function deleteMission(id) {
 }
 
 Object.assign(TOOLS, {
+  list_accounts: {
+    description: 'See which sites the owner is already signed in to in this browser (Google, YouTube, CapCut, GitHub, Instagram, Facebook, TikTok, X, LinkedIn, WhatsApp) and which Google accounts are available. On sites with "Continue with Google", pick one of these Google accounts instead of typing a password.',
+    schema: {}, run: async () => { if (!accountsFn) throw new Error('Not available'); const a = await accountsFn(); return text({ signed_in: a.sites.filter(s => s.signedIn).map(s => s.name), not_signed_in: a.sites.filter(s => !s.signedIn).map(s => s.name), google_accounts: a.google.map(g => g.email) }); }
+  },
   answer_dialog: {
     description: 'Choose how the NEXT pop-up (alert / confirm "Are you sure?" / prompt asking for text) in a tab is answered. Without this, pop-ups in a tab you are working in are answered OK (prompts get their default text) and the result tells you what was shown.',
     schema: { accept: { type: 'boolean', description: 'true = OK, false = Cancel' }, text: { type: 'string', description: 'Text to enter if it is a prompt' }, ...TAB }, required: ['accept'],
@@ -733,7 +737,7 @@ function prompt(key, op, args) {
 }
 function waitShort(p) { return Promise.race([p, new Promise(r => setTimeout(() => r(WAITING), TOOL_WAIT))]); }
 const approvals = new Map();   // client -> { plan, t }
-const NO_APPROVAL_NEEDED = new Set(['list_downloads', 'answer_dialog', 'check_helpers', 'mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
+const NO_APPROVAL_NEEDED = new Set(['list_accounts', 'list_downloads', 'answer_dialog', 'check_helpers', 'mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
 function setApproved(client, plan) { approvals.set(client, { plan: plan || '', t: Date.now() }); notify({ type: 'approvals' }); }
 async function ensureApproved(client, name, args) {
   if (cfg.mode === 'auto' || client === 'Orbit' || /^Orbit · Helper \d+$/.test(client) || approvals.has(client) || isTrusted(client) || NO_APPROVAL_NEEDED.has(name)) return;
@@ -844,7 +848,7 @@ For bigger jobs, start with mission_start (goal + success criteria), prove each 
 Typical loop: snapshot -> click/type using the [ref] numbers or visible text -> snapshot again to check. If a click warns that a popup covered the target, close the popup first.
 Addresses ending in .mini (home.mini, chirp.mini, talk.mini, people.mini) are MiniNet Chat — a small local social feed and chat rooms. Everything else is the real web.
 Many AIs can work in this browser at the same time. Each AI gets its own tab: if another AI is busy in the tab you would use, you are given a new one automatically (list_tabs shows who works where). To do several jobs at once yourself, open several tabs and pass each tab id — tool calls on different tabs can run in parallel, so you can act as a team of agents.
-If the owner has to sign in somewhere (a password, a code from their phone), use ask_user to let them sign in, then carry on in that signed-in tab.
+The owner's logins are kept in this browser: call list_accounts to see where they are already signed in. When a site offers "Continue with Google" / "Sign in with Google", use it and choose one of the owner's Google accounts. Never type passwords; if a password, a code from their phone or a captcha is needed, use ask_user so the owner does that part, then carry on in that signed-in tab.
 You can also create browser extensions with save_extension. You cannot change the browser's own code.`;
 
 // OpenAPI description so ChatGPT custom GPTs (Actions) and other tool-calling AIs can use the browser too
@@ -972,8 +976,9 @@ function start() {
 function stop() { if (server) { server.close(); server = null; } }
 function restart() { stop(); start(); }
 
-function init({ userData, shell, onEvent }) {
-  shellReq = shell; notify = onEvent || notify;
+let accountsFn = null;
+function init({ userData, shell, onEvent, accounts }) {
+  shellReq = shell; notify = onEvent || notify; accountsFn = accounts || null;
   loadConfig(userData);
   missionInit(userData);
   start();
