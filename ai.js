@@ -79,11 +79,11 @@ const PROVIDERS = {
   ollama: { name: 'Ollama (free, runs on this computer)', kind: 'openai', url: 'http://localhost:11434/v1/chat/completions', model: 'qwen2.5:7b', key: false, vision: false, keyHelp: 'ollama.com' },
   custom: { name: 'Custom (OpenAI-compatible)', kind: 'openai', url: '', model: '', key: true, vision: false, keyHelp: '' }
 };
-const orbit = Object.assign({ provider: 'ollama', models: {}, urls: {}, speak: false, instructions: '', voice: 'auto' }, load('orbit', {}));
+const orbit = Object.assign({ provider: 'ollama', models: {}, urls: {}, speak: false, instructions: '', voice: 'auto', backups: [] }, load('orbit', {}));
 function saveOrbit() { store('orbit', orbit); }
-function prov() { return PROVIDERS[orbit.provider] || PROVIDERS.ollama; }
-function modelName() { return orbit.models[orbit.provider] || prov().model; }
-function provUrl() { return orbit.urls[orbit.provider] || prov().url; }
+function prov(pk = orbit.provider) { return PROVIDERS[pk] || PROVIDERS.ollama; }
+function modelName(pk = orbit.provider) { return orbit.models[pk] || prov(pk).model; }
+function provUrl(pk = orbit.provider) { return orbit.urls[pk] || prov(pk).url; }
 
 let convo = [];          // neutral format: {role:'user',text} | {role:'assistant',text,calls:[]} | {role:'tool',results:[]}
 let running = false, abortFlag = false, toolDefs = null;
@@ -137,6 +137,7 @@ function paintConvo() {
       for (const c of m.calls || []) html += `<div class="step" data-call="${esc(c.id)}">⚙ <b>${esc(stepLabel(c))}</b><span class="st">${c.status === 'ok' ? '<span class="ok">✓</span>' : c.status === 'err' ? '<span class="bad">✗</span>' : '…'}</span></div>`;
     }
     if (m.role === 'error') html += `<div class="om err">⚠ ${esc(m.text)}</div>`;
+    if (m.role === 'note') html += `<div class="step" style="opacity:.85">${esc(m.text)}</div>`;
   }
   if (running) html += '<div class="thinking"><i></i><i></i><i></i></div>';
   box.innerHTML = html;
@@ -171,7 +172,7 @@ ${orbit.instructions ? 'User\'s custom instructions: ' + orbit.instructions : ''
 async function getTools() { if (!toolDefs) toolDefs = await window.app.agentTools(); return toolDefs; }
 function contentText(content) { return (content || []).filter(c => c.type === 'text').map(c => c.text).join('\n'); }
 
-function toAnthropic(sys, tools, convo) {
+function toAnthropic(sys, tools, convo, pk = orbit.provider) {
   const msgs = [];
   const toolRounds = convo.filter(m => m.role === 'tool').length;
   let roundIdx = 0;
@@ -194,9 +195,9 @@ function toAnthropic(sys, tools, convo) {
       })));
     }
   }
-  return { model: modelName(), max_tokens: 4096, system: sys, tools: tools.map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema })), messages: msgs };
+  return { model: modelName(pk), max_tokens: 4096, system: sys, tools: tools.map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema })), messages: msgs };
 }
-function toOpenAI(sys, tools, convo) {
+function toOpenAI(sys, tools, convo, pk = orbit.provider) {
   const msgs = [{ role: 'system', content: sys }];
   const toolRounds = convo.filter(m => m.role === 'tool').length;
   let roundIdx = 0;
@@ -216,28 +217,43 @@ function toOpenAI(sys, tools, convo) {
         msgs.push({ role: 'tool', tool_call_id: r.id, content: (r.isError ? 'ERROR: ' : '') + (t || 'done') });
         r.content.filter(c => c.type === 'image').forEach(c => imgs.push(c));
       }
-      if (imgs.length && recent && prov().vision) msgs.push({ role: 'user', content: [{ type: 'text', text: 'Screenshot from the tool above:' }, ...imgs.map(c => ({ type: 'image_url', image_url: { url: `data:${c.mimeType};base64,${c.data}` } }))] });
+      if (imgs.length && recent && prov(pk).vision) msgs.push({ role: 'user', content: [{ type: 'text', text: 'Screenshot from the tool above:' }, ...imgs.map(c => ({ type: 'image_url', image_url: { url: `data:${c.mimeType};base64,${c.data}` } }))] });
     }
   }
-  return { model: modelName(), messages: msgs, tools: tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.inputSchema } })), tool_choice: 'auto' };
+  return { model: modelName(pk), messages: msgs, tools: tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.inputSchema } })), tool_choice: 'auto' };
 }
 
-async function callModel(cv = convo, sysExtra = '', exclude = null) {
-  const p = prov(), sys = (await systemPrompt()) + (sysExtra ? '\n' + sysExtra : '');
+// Local Ollama: if the chosen model isn't installed, use the best installed model that can use tools
+let ollamaChecked = 0;
+async function ollamaPick() {
+  if (Date.now() - ollamaChecked < 60000) return; ollamaChecked = Date.now();
+  try {
+    const base = provUrl('ollama').replace(/\/v1\/chat\/completions.*$/, '');
+    const r = await window.app.llm({ url: base + '/api/tags', method: 'GET' });
+    const names = ((r.ok && r.data && r.data.models) || []).map(m => m.name);
+    if (!names.length || names.includes(modelName('ollama')) || names.includes(modelName('ollama') + ':latest')) return;
+    const pref = [/^qwen3/, /^qwen2\.5/, /^llama3\.[123]/, /^mistral/, /^gemma3/, /^granite/, /^phi4/, /./];
+    for (const p of pref) { const m = names.find(n => p.test(n) && !/embed/i.test(n)); if (m) { orbit.models.ollama = m; saveOrbit(); toast('Orbit is using your local model ' + m); return; } }
+  } catch {}
+}
+// Ask one brain (provider) for the next step
+async function callBrain(pk, cv, sysExtra = '', exclude = null) {
+  const p = prov(pk), sys = (await systemPrompt()) + (sysExtra ? '\n' + sysExtra : '');
   let tools = await getTools(); if (exclude) tools = tools.filter(t => !exclude.has(t.name));
-  const url = provUrl();
+  const url = provUrl(pk);
   if (!url) throw new Error('Set the API address for the custom provider in Orbit settings.');
-  if (!modelName()) throw new Error('Choose a model in Orbit settings.');
+  if (!modelName(pk)) throw new Error('Choose a model in Orbit settings.');
   if (p.kind === 'anthropic') {
-    const r = await window.app.llm({ url, headers: { 'anthropic-version': '2023-06-01' }, body: toAnthropic(sys, tools, cv), keyName: 'key.' + orbit.provider, keyHeader: 'x-api-key', keyPrefix: '' });
+    const r = await window.app.llm({ url, headers: { 'anthropic-version': '2023-06-01' }, body: toAnthropic(sys, tools, cv, pk), keyName: 'key.' + pk, keyHeader: 'x-api-key', keyPrefix: '' });
     if (!r.ok) throw new Error(r.error);
     const blocks = r.data.content || [];
     return { text: blocks.filter(b => b.type === 'text').map(b => b.text).join('\n').trim(), calls: blocks.filter(b => b.type === 'tool_use').map(b => ({ id: b.id, name: b.name, args: b.input || {} })) };
   }
-  const extra = orbit.provider === 'openrouter' ? { 'HTTP-Referer': 'https://mininet.browser', 'X-Title': 'MiniNet Browser' } : {};
-  const r = await window.app.llm({ url, headers: extra, body: toOpenAI(sys, tools, cv), keyName: p.key ? 'key.' + orbit.provider : null });
+  if (pk === 'ollama') await ollamaPick();
+  const extra = pk === 'openrouter' ? { 'HTTP-Referer': 'https://mininet.browser', 'X-Title': 'MiniNet Browser' } : {};
+  const r = await window.app.llm({ url, headers: extra, body: toOpenAI(sys, tools, cv, pk), keyName: p.key ? 'key.' + pk : null });
   if (!r.ok) {
-    if (orbit.provider === 'ollama' && /fetch failed|ECONNREFUSED/i.test(r.error)) throw new Error('Ollama is not running. Start Ollama on this computer (and pull a model that supports tools, e.g. "ollama pull qwen2.5:7b").');
+    if ((pk === 'ollama' || pk === 'lmstudio') && /fetch failed|ECONNREFUSED/i.test(r.error)) throw new Error(p.name.split(' (')[0] + ' is not running. Start it on this computer (and pull a model that supports tools, e.g. "ollama pull qwen2.5:7b").');
     throw new Error(r.error);
   }
   const msg = (r.data.choices && r.data.choices[0] && r.data.choices[0].message) || {};
@@ -245,6 +261,49 @@ async function callModel(cv = convo, sysExtra = '', exclude = null) {
     text: (msg.content || '').trim(),
     calls: (msg.tool_calls || []).map((c, i) => { let a = {}; try { a = JSON.parse(c.function.arguments || '{}'); } catch {} return { id: c.id || ('call_' + Date.now() + i), name: c.function.name, args: a }; })
   };
+}
+
+async function anyBrainReady() { for (const k of [orbit.provider, ...(orbit.backups || [])]) { if (!PROVIDERS[k]) continue; if (!prov(k).key || await window.app.secretHas('key.' + k)) return true; } return false; }
+/* Brain router: try the main brain, and if it is out of quota, offline or failing, switch to the next backup brain.
+   A brain that failed rests for a while (longer for quota limits) before it is tried again. */
+const brainRest = new Map();   // provider -> { until, why }
+function classifyFail(msg) {
+  const m = String(msg || '');
+  if (/429|quota|rate.?limit|resource.?exhausted|too many requests|insufficient.?(credit|balance|funds)|billing/i.test(m)) return { kind: 'free limit reached', rest: 15 * 60e3 };
+  if (/401|403|invalid.*key|unauthori[sz]ed|permission|no api key/i.test(m)) return { kind: 'key refused', rest: 60 * 60e3 };
+  if (/not running|fetch failed|ECONN|ENOTFOUND|network|timed? ?out|socket|EAI_AGAIN/i.test(m)) return { kind: 'not reachable', rest: 60e3 };
+  if (/\b5\d\d\b|overloaded|unavailable|internal server/i.test(m)) return { kind: 'overloaded', rest: 2 * 60e3 };
+  if (/model.*(not found|does not exist|not supported)|no such model|tool.*not supported|does not support tools/i.test(m)) return { kind: 'model unavailable', rest: 30 * 60e3 };
+  return null;   // a real error in the request — don't hide it by switching
+}
+function brainOrder() {
+  const list = [orbit.provider, ...(orbit.backups || [])].filter((k, i, a) => PROVIDERS[k] && a.indexOf(k) === i);
+  const now = Date.now(), ready = list.filter(k => !(brainRest.get(k) && brainRest.get(k).until > now));
+  return ready.length ? ready : list;   // all resting? try them anyway
+}
+async function callModel(cv = convo, sysExtra = '', exclude = null) {
+  const order = brainOrder();
+  let lastErr = null; const errs = [];
+  for (let i = 0; i < order.length; i++) {
+    const pk = order[i];
+    if (prov(pk).key && !(await window.app.secretHas('key.' + pk))) { lastErr = new Error(prov(pk).name + ' has no API key'); continue; }
+    try {
+      const res = await callBrain(pk, cv, sysExtra, exclude);
+      brainRest.delete(pk);
+      if (pk !== orbit.provider) res.brain = pk;
+      return res;
+    } catch (e) {
+      lastErr = e; errs.push(prov(pk).name.split(' (')[0] + ': ' + e.message);
+      const c = classifyFail(e.message);
+      if (!c || i === order.length - 1) break;
+      brainRest.set(pk, { until: Date.now() + c.rest, why: c.kind });
+      const next = order[i + 1];
+      cv.push({ role: 'note', text: `🧠 ${prov(pk).name.split(' (')[0]}: ${c.kind} — switching to ${prov(next).name.split(' (')[0]}.` });
+      if (cv === convo) paintConvo();
+    }
+  }
+  if (errs.length > 1) throw new Error(errs.join('  •  '));
+  throw lastErr || new Error('No AI brain is available. Add a key or start Ollama in Orbit settings.');
 }
 
 // One agent loop, shared by Orbit and its helper agents
@@ -275,7 +334,7 @@ async function sendOrbit(textOverride) {
   const ta = $('#oText');
   const text = (textOverride || (ta && ta.value) || '').trim();
   if (!text) return;
-  if (prov().key && !(await window.app.secretHas('key.' + orbit.provider))) { toast('Add your ' + prov().name + ' API key first'); return renderOrbitSettings($('#panelBody')); }
+  if (!(await anyBrainReady())) { toast('Add your ' + prov().name + ' API key first (or a backup brain)'); return renderOrbitSettings($('#panelBody')); }
   if (ta) ta.value = '';
   convo.push({ role: 'user', text });
   running = true; abortFlag = false; paintConvo();
@@ -297,7 +356,7 @@ function helperView(h) { return { name: h.name, task: h.task.slice(0, 300), stat
 async function startHelper({ task, url, by }) {
   if (!task) throw new Error('Give the helper a task.');
   if (helpers.filter(h => h.status === 'running').length >= 8) throw new Error('8 helpers are already running — wait for some to finish (check_helpers) or stop one.');
-  if (prov().key && !(await window.app.secretHas('key.' + orbit.provider))) throw new Error('Helpers use the AI chosen in Orbit settings, and it has no API key yet. Ask the owner to add one (or pick free Ollama) in Orbit settings.');
+  if (!(await anyBrainReady())) throw new Error('Helpers use the AI brains chosen in Orbit settings, and none has an API key yet. Ask the owner to add one (or pick free Ollama) in Orbit settings.');
   const n = ++helperSeq, name = 'Orbit · Helper ' + n, owner = 'helper:' + n;
   const h = { n, name, owner, task, by: by || 'Orbit', status: 'running', steps: 0, result: '', tab: null, stop: false, cv: [{ role: 'user', text: task }] };
   helpers.push(h);
@@ -346,6 +405,8 @@ function renderOrbitSettings(body) {
       ${p.key ? `<label style="display:block">API key <span id="osHas" style="color:var(--dim)"></span><input class="inp" id="osKey" type="password" placeholder="paste your key"></label>
         <small>Get a key at ${esc(p.keyHelp)}</small>` : `<small>No key needed. Install Ollama, then run <code>ollama pull ${esc(modelName())}</code>. Pick a model that supports tools (qwen2.5, llama3.1, mistral-nemo).</small>`}
     </div>
+    <div class="set"><b>🧠 Backup brains</b><small>If the main AI runs out of free quota, goes offline or fails, Orbit and its helpers switch to the next one automatically and carry on. Tick the ones you have set up (pick each in the list above once to add its key).</small>
+      <div id="osBk">${Object.entries(PROVIDERS).filter(([k]) => k !== orbit.provider && k !== 'custom' || (k === 'custom' && orbit.urls.custom)).map(([k, v]) => `<label style="display:flex;gap:8px;align-items:center;justify-content:flex-start;text-align:left;margin:4px 0"><input type="checkbox" data-bk="${k}" ${(orbit.backups || []).includes(k) ? 'checked' : ''}> <span style="flex:1">${esc(v.name)}</span> <small style="margin:0;color:var(--dim)">${esc(modelName(k) || '')}</small></label>`).join('')}</div></div>
     <div class="set"><b>Voice input</b><small>Talking to Orbit needs a Groq, OpenAI or Gemini key.</small>
       <select class="inp" id="osVoice"><option value="auto">Automatic</option><option value="groq" ${orbit.voice === 'groq' ? 'selected' : ''}>Groq Whisper (key from Groq)</option><option value="openai" ${orbit.voice === 'openai' ? 'selected' : ''}>OpenAI Whisper (key from OpenAI)</option><option value="gemini" ${orbit.voice === 'gemini' ? 'selected' : ''}>Gemini (key from Google)</option></select></div>
     <div class="set"><b>Custom instructions</b><small>Anything Orbit should always know or do.</small>
@@ -358,6 +419,7 @@ function renderOrbitSettings(body) {
     orbit.models[orbit.provider] = $('#osModel').value.trim();
     if ($('#osUrl')) orbit.urls[orbit.provider] = $('#osUrl').value.trim();
     orbit.voice = $('#osVoice').value; orbit.instructions = $('#osInst').value.trim();
+    orbit.backups = [...body.querySelectorAll('[data-bk]')].filter(x => x.checked).map(x => x.dataset.bk);
     const k = $('#osKey') && $('#osKey').value.trim();
     if (k) await window.app.secretSet('key.' + orbit.provider, k);
     saveOrbit(); toast('Orbit settings saved'); renderOrbit(body);

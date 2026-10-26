@@ -6,7 +6,7 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { webContents, nativeImage } = require('electron');
+const { webContents, nativeImage, app: eApp } = require('electron');
 const ext = require('./extensions');
 
 let cfg = { enabled: true, port: 7811, token: '', mode: 'ask', trusted: [] };
@@ -22,6 +22,7 @@ function loadConfig(userData) {
   cfgPath = path.join(userData, 'agent.json');
   try { cfg = Object.assign(cfg, JSON.parse(fs.readFileSync(cfgPath, 'utf8'))); } catch {}
   if (!cfg.token) cfg.token = crypto.randomBytes(24).toString('hex');
+  loadNames();
   saveConfig();
 }
 function saveConfig() { try { fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2)); } catch {} }
@@ -173,7 +174,7 @@ async function pointFor(wc, { ref, selector, x, y, text: label }) {
     if (best.score === 3 && !best.inFrame) break;  // exact match on the main page
   }
   if (best) { if (best.inFrame) await fjs(best.frame, LOCATE_JS(ref, selector, label)).catch(() => {}); return best; }
-  throw new Error(ref != null ? `No element [${ref}] — take a new snapshot, the page may have changed.` : selector ? `Nothing matches selector ${selector}` : `No visible element with text "${label}"`);
+  throw new Error(ref != null ? `No element [${ref}] — take a new snapshot, the page may have changed.` : selector ? `Nothing matches selector ${selector}` : `No visible element with text "${label}". If it is a field that only appears after clicking something (a search icon, a menu), click that first; otherwise take a snapshot and use a [ref].`);
 }
 // Clicks inside embedded frames are performed from inside the frame (as a real user gesture),
 // because the engine does not route simulated mouse events into isolated frames.
@@ -327,9 +328,21 @@ const TOOLS = {
         }
         await mouseClick(wc, p);
         await sleep(30);
+        // make sure the click really put the cursor in that field (hidden/collapsed fields can't take typing)
+        const focusOk = await fjs(p.frame, `(() => { let t = document.querySelector('[data-mn-target]'); if (t && t.tagName === 'LABEL' && t.control) t = t.control; const f = document.activeElement; if (!t) return 'ok'; if (f && (f === t || t.contains(f) || f.contains(t))) return 'ok';
+          const r = t.getBoundingClientRect(), cs = getComputedStyle(t); const hidden = !r.width || !r.height || cs.visibility === 'hidden' || cs.display === 'none' || +cs.opacity === 0;
+          if (hidden) { t.focus(); if (document.activeElement === t) return 'focused-hidden'; return 'hidden'; } return 'covered:' + (f ? f.tagName.toLowerCase() + (f.id ? '#' + f.id : '') : 'nothing'); })()`).catch(() => 'ok');
+        if (focusOk === 'hidden') throw new Error('That field exists but is hidden or collapsed, so it cannot be typed into yet. Click the button that opens it first (for example a search icon), then type again.');
+        if (focusOk.startsWith('covered:')) throw new Error('The click did not land in that field (focus went to ' + focusOk.slice(8) + '). Something may be covering it — take a snapshot, close any popup, then try again.');
         if (!a.append) await fjs(p.frame, `(() => { const e = document.activeElement; if (!e) return; if ('value' in e && typeof e.select === 'function') { e.select(); } else { document.execCommand('selectAll'); } })()`).catch(() => {});
       }
       wc.insertText(String(a.text));
+      if ((a.ref != null || a.selector || a.field) && String(a.text).length) {
+        await sleep(40);
+        const tail = String(a.text).slice(-12);
+        const landed = await js(wc, `(() => { let f = document.activeElement; while (f && f.shadowRoot && f.shadowRoot.activeElement) f = f.shadowRoot.activeElement; if (!f || f === document.body || f === document.documentElement) return 'none'; if (f.tagName === 'IFRAME') return 'frame'; const v = ('value' in f ? f.value : f.innerText) || ''; return v.includes(${JSON.stringify(tail)}) ? 'ok' : 'other:' + f.tagName.toLowerCase(); })()`).catch(() => 'ok');
+        if (landed === 'none') throw new Error('Nothing took the typing — that field is probably hidden or collapsed. Click the button that opens it first (for example a search icon), then type again.');
+      }
       if (a.submit) { await sleep(80); pressKey(wc, 'Enter'); await waitLoad(wc, 15000, 1200); }
       return text({ typed: a.text.length + ' characters', submitted: !!a.submit, url: displayUrl(wc.getURL()) });
     }
@@ -412,6 +425,35 @@ const TOOLS = {
         await sleep(250);
       }
       throw new Error('Timed out waiting');
+    }
+  },
+  list_downloads: {
+    description: 'List the newest files in the user\'s Downloads folder (name, size, date). Only this folder can be used with upload_file.',
+    schema: {}, run: async () => {
+      const dir = eApp.getPath('downloads');
+      const items = fs.readdirSync(dir).map(n => { try { const st = fs.statSync(path.join(dir, n)); return st.isFile() ? { name: n, size_kb: Math.round(st.size / 1024), modified: st.mtime.toISOString() } : null; } catch { return null; } }).filter(Boolean).sort((a, b) => b.modified.localeCompare(a.modified)).slice(0, 40);
+      return text(items.length ? items : 'The Downloads folder is empty.');
+    }
+  },
+  upload_file: {
+    description: 'Put a file into a file-upload field on the page (for example to upload a video to an editor, a photo to a post, or a CV to a form). The file must be in the user\'s Downloads folder — use download first to fetch it, or list_downloads to see what is there. Target the upload field by CSS selector; leave it out to use the first file field on the page.',
+    schema: { file: { type: 'string', description: 'File name in the Downloads folder' }, selector: { type: 'string' }, ...TAB }, required: ['file'],
+    run: async a => {
+      const { wc } = await tabWC(a.tab);
+      const dir = eApp.getPath('downloads');
+      const full = path.resolve(dir, String(a.file));
+      if (!full.startsWith(path.resolve(dir) + path.sep) || !fs.existsSync(full) || !fs.statSync(full).isFile()) throw new Error('No file called "' + a.file + '" in the Downloads folder. Use list_downloads to see what is there.');
+      const sel = a.selector || 'input[type=file]';
+      const dbg = wc.debugger; let attached = false;
+      try {
+        if (!dbg.isAttached()) { dbg.attach('1.3'); attached = true; }
+        const r = await dbg.sendCommand('Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(sel)})` });
+        if (!r.result || !r.result.objectId || r.result.subtype === 'null') throw new Error('No file-upload field matches ' + sel + ' on this page (it may be inside an embedded frame, or appear only after clicking an Upload button — click it first, then try again).');
+        await dbg.sendCommand('DOM.setFileInputFiles', { files: [full], objectId: r.result.objectId });
+        await dbg.sendCommand('Runtime.callFunctionOn', { objectId: r.result.objectId, functionDeclaration: 'function(){ this.dispatchEvent(new Event("input", {bubbles:true})); this.dispatchEvent(new Event("change", {bubbles:true})); }' }).catch(() => {});
+      } finally { if (attached) try { dbg.detach(); } catch {} }
+      await sleep(500);
+      return text({ uploaded: path.basename(full), size_kb: Math.round(fs.statSync(full).size / 1024), into: sel });
     }
   },
   download: {
@@ -691,7 +733,7 @@ function prompt(key, op, args) {
 }
 function waitShort(p) { return Promise.race([p, new Promise(r => setTimeout(() => r(WAITING), TOOL_WAIT))]); }
 const approvals = new Map();   // client -> { plan, t }
-const NO_APPROVAL_NEEDED = new Set(['answer_dialog', 'check_helpers', 'mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
+const NO_APPROVAL_NEEDED = new Set(['list_downloads', 'answer_dialog', 'check_helpers', 'mission_report', 'list_tabs', 'snapshot', 'read_text', 'screenshot', 'wait_for', 'list_extensions', 'get_extension', 'request_permission', 'ask_user', 'show_message']);
 function setApproved(client, plan) { approvals.set(client, { plan: plan || '', t: Date.now() }); notify({ type: 'approvals' }); }
 async function ensureApproved(client, name, args) {
   if (cfg.mode === 'auto' || client === 'Orbit' || /^Orbit · Helper \d+$/.test(client) || approvals.has(client) || isTrusted(client) || NO_APPROVAL_NEEDED.has(name)) return;
@@ -774,6 +816,7 @@ async function call(name, args = {}, client = 'AI agent', ownerKey) {
     else claim(key, client, +args.tab);
   }
   if (name === 'open_tab' && args.background == null && anotherBusy(key)) args.background = true;
+  if (args.tab != null) shellReq('follow', { id: +args.tab }).catch(() => {});
   const entry = { t: Date.now(), client, tool: name, summary: summarize(name, args || {}), ok: null };
   log.unshift(entry); if (log.length > 200) log.pop();
   notify({ type: 'activity', ...entry, status: 'start' });
@@ -782,7 +825,7 @@ async function call(name, args = {}, client = 'AI agent', ownerKey) {
     let r;
     if (m && m.status === 'running' && !MISSION_TOOLS.has(name)) { checkMissionLimits(m, name, args || {}); r = await recordStep(m, name, args || {}, () => t.run(args || {}, client)); }
     else r = await t.run(args || {}, client);
-    if (name === 'open_tab') { try { const id = JSON.parse(r.content[0].text).opened; if (id) claim(key, client, id); } catch {} }
+    if (name === 'open_tab') { try { const id = JSON.parse(r.content[0].text).opened; if (id) { claim(key, client, id); shellReq('follow', { id }).catch(() => {}); } } catch {} }
     if (name === 'switch_tab') claim(key, client, +args.tab);
     if (args.tab != null && dialogLog.has(+args.tab)) { note = (note ? note + ' ' : '') + dialogLog.get(+args.tab).join('; ') + '. (Use answer_dialog first to choose Cancel or a different answer.)'; dialogLog.delete(+args.tab); }
     if (note && r && r.content) r = { ...r, content: [...r.content, { type: 'text', text: 'Note: ' + note }] };
@@ -807,7 +850,7 @@ You can also create browser extensions with save_extension. You cannot change th
 // OpenAPI description so ChatGPT custom GPTs (Actions) and other tool-calling AIs can use the browser too
 let publicUrl = null;
 function setPublicUrl(u) { publicUrl = u || null; }
-const OPENAPI_SKIP = new Set(['mission_note', 'mission_report', 'get_extension', 'toggle_extension', 'delete_extension', 'hover', 'go_forward', 'stop_helper', 'speak']);  // ChatGPT Actions allow 30
+const OPENAPI_SKIP = new Set(['mission_note', 'mission_report', 'get_extension', 'toggle_extension', 'delete_extension', 'hover', 'go_forward', 'stop_helper', 'speak', 'list_downloads', 'answer_dialog']);  // ChatGPT Actions allow 30
 function openApi(token) {
   const base = (publicUrl || `http://127.0.0.1:${cfg.port}`) + (token ? '/t/' + token : '');
   const paths = {};
@@ -844,13 +887,17 @@ function readBody(req) {
 }
 
 let clientNames = new Map();
+// remember which app each MCP session belongs to, so names survive a browser restart
+function namesFile() { return cfgPath ? path.join(path.dirname(cfgPath), 'clients.json') : null; }
+function loadNames() { try { clientNames = new Map(JSON.parse(fs.readFileSync(namesFile(), 'utf8'))); } catch {} }
+function saveNames() { try { fs.writeFileSync(namesFile(), JSON.stringify([...clientNames].slice(-200))); } catch {} }
 async function handleRpc(msg, sessionKey) {
   const { id, method, params = {} } = msg;
   const ok = result => ({ jsonrpc: '2.0', id, result });
   const err = (code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
   if (method === 'initialize') {
     const name = (params.clientInfo && params.clientInfo.name) || 'MCP client';
-    clientNames.set(sessionKey, outsideName(prettyClient(name))); clientNames.set('default', outsideName(prettyClient(name)));
+    clientNames.set(sessionKey, outsideName(prettyClient(name))); clientNames.set('default', outsideName(prettyClient(name))); saveNames();
     return ok({ protocolVersion: params.protocolVersion || '2025-06-18', capabilities: { tools: { listChanged: false } },
       serverInfo: { name: 'mininet-browser', title: 'MiniNet Browser', version: require('./package.json').version }, instructions: INSTRUCTIONS });
   }

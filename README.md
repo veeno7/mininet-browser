@@ -26,6 +26,9 @@ Most AI assistants can talk about the web. MiniNet Browser lets them **use** it 
 
 - 🤖 **Any AI can drive it** — Claude (Desktop, Code, claude.ai connector), ChatGPT (connectors or custom GPT Actions), Cursor, Windsurf, Codex, Gemini, local Ollama models, or your own scripts.
 - 👥 **Many AIs at once** — Claude, ChatGPT and Gemini can all work in the browser at the same time, each in its own tab. Any AI can also start **helper agents** (`start_helper`) that work in parallel — one answers messages while another edits or researches. Watch them all side by side in **Team view**.
+- 🧠 **Brain router** — pick a main AI and backup brains. If one hits its free limit, goes offline or fails, Orbit and its helpers switch to the next and keep working (a free local Ollama model makes a great last resort).
+- 👀 **You see everything** — the tab an AI works in comes to the front; when several AIs work at once, Team view opens by itself with a name label on every tile.
+- 📎 **Uploads & pop-ups** — AIs can upload files from your Downloads folder (videos to an editor, photos to a post) and answer "Are you sure?" pop-ups; pop-ups never freeze a page.
 - 🔗 **Permanent connector link** — set up a free ngrok address once; paste the link into your AI and it keeps working every time the browser is open.
 - 🎯 **Missions with proof** — goals, budgets and success checks the browser verifies itself, with a replayable evidence record.
 - ✋ **You approve first** — an AI shows its plan; you press **Allow**, **Always allow** or **Deny**. A glowing outline and a "Claude is using the browser · Stop AI" bar show exactly what it's doing.
@@ -64,10 +67,10 @@ Open the 🔌 **AI control** panel in the sidebar.
 | **Cursor, Windsurf, Codex, others** | Copy the MCP JSON config from the panel. |
 | **Your own code** | `POST http://127.0.0.1:7811/api/tools/<tool>` with `Authorization: Bearer <key>` |
 
-### Tools an AI gets (38)
+### Tools an AI gets (41)
 
 `list_tabs` `open_tab` `navigate` `go_back` `go_forward` `reload` `switch_tab` `close_tab` `close_other_tabs`
-`snapshot` `read_text` `click` `type` `select_option` `press_key` `scroll` `hover` `screenshot` `run_js` `wait_for` `download`
+`snapshot` `read_text` `click` `type` `select_option` `press_key` `scroll` `hover` `screenshot` `run_js` `wait_for` `download` `list_downloads` `upload_file` `answer_dialog`
 `speak` `show_message` `request_permission` `ask_user`
 `list_extensions` `get_extension` `save_extension` `toggle_extension` `delete_extension`
 `mission_start` `mission_verify` `mission_note` `mission_finish` `mission_report`

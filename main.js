@@ -267,6 +267,7 @@ function tunnelConf(patch) {
   if (patch) { c = Object.assign(c, patch); fs.writeFileSync(tunnelFile(), JSON.stringify(c)); }
   return c;
 }
+function tunnelLog(line) { try { const f = path.join(app.getPath('userData'), 'tunnel.log'); fs.appendFileSync(f, new Date().toISOString() + ' ' + String(line).slice(0, 500) + '\n'); if (fs.statSync(f).size > 200000) fs.writeFileSync(f, ''); } catch {} }
 function tunnelState() { const c = tunnelConf(); return { status: tunnel.status, url: tunnel.url, error: tunnel.error, progress: tunnel.progress, provider: c.provider, domain: c.domain, hasNgrokKey: !!readSecrets().ngrok }; }
 function tunnelEmit() { agent.setPublicUrl(tunnel.status === 'on' ? tunnel.url : null); win && !win.isDestroyed() && win.webContents.send('tunnel', tunnelState()); }
 function binPath(name) { return path.join(app.getPath('userData'), 'bin', process.platform === 'win32' ? name + '.exe' : name); }
@@ -325,7 +326,7 @@ async function tunnelStart() {
       if (!key) throw new Error('Paste your free ngrok authtoken first.');
       const exe = await ensureNgrok();
       tunnel.status = 'starting'; tunnelEmit();
-      const args = ['http', `127.0.0.1:${port}`, '--host-header=rewrite', '--log=stdout', '--log-format=json'];
+      const args = ['http', `127.0.0.1:${port}`, '--host-header=rewrite', '--log=stdout', '--log-format=json', '--pooling-enabled'];
       const dom = cleanDomain(conf.domain);
       if (dom) args.push('--url=https://' + dom);
       p = spawn(exe, args, { windowsHide: true, env: Object.assign({}, process.env, { NGROK_AUTHTOKEN: key }) });
@@ -333,8 +334,9 @@ async function tunnelStart() {
       const onData = d => {
         buf += String(d); const lines = buf.split('\n'); buf = lines.pop();
         for (const line of lines) {
-          let j; try { j = JSON.parse(line); } catch { continue; }
-          if (j.url && /^https:/.test(j.url) && !tunnel.url) { tunnel.url = j.url.replace(/\/$/, ''); tunnel.status = 'on'; if (!dom) tunnelConf({ domain: cleanDomain(tunnel.url) }); tunnelEmit(); }
+          let j; try { j = JSON.parse(line); } catch { if (line.trim()) { tunnelLog('ngrok: ' + line); if (/ERR_NGROK|error/i.test(line)) { tunnel.error = line.trim().slice(0, 300); tunnelEmit(); } } continue; }
+          if (j.url && /^https:/.test(j.url) && !tunnel.url) { tunnelLog('online ' + j.url); tunnel.tries = 0; tunnel.url = j.url.replace(/\/$/, ''); tunnel.status = 'on'; if (!dom) tunnelConf({ domain: cleanDomain(tunnel.url) }); tunnelEmit(); }
+          if (j.lvl === 'eror' || j.lvl === 'crit' || j.lvl === 'warn') tunnelLog(line);
           if (j.lvl === 'eror' || j.lvl === 'crit') { tunnel.error = String(j.err || j.msg || 'ngrok error').replace(/\s+/g, ' ').slice(0, 300); tunnelEmit(); }
         }
       };
@@ -357,14 +359,16 @@ async function tunnelStart() {
       if (tunnel.status !== 'off') {
         tunnel.status = 'off'; tunnel.url = null;
         if (code && !tunnel.error) tunnel.error = 'The link stopped (code ' + code + ').';
-        if (tunnelConf().on && !tunnel.restarts) { tunnel.restarts = 1; setTimeout(() => { tunnel.restarts = 0; if (tunnelConf().on && !tunnel.proc) tunnelStart(); }, 15000); }
+        tunnelLog('exit code ' + code + (tunnel.error ? ' — ' + tunnel.error : ''));
+        // keep the permanent link alive: retry with a growing pause (5s, 15s, 30s, then every 60s)
+        if (tunnelConf().on && !tunnel.retryT) { const n = (tunnel.tries = (tunnel.tries || 0) + 1); const wait = [5, 15, 30][n - 1] || 60; tunnel.retryT = setTimeout(() => { tunnel.retryT = null; if (tunnelConf().on && !tunnel.proc) tunnelStart(); }, wait * 1000); }
       }
       tunnelEmit();
     });
     setTimeout(() => { if (tunnel.proc === p && !tunnel.url && !tunnel.error) { tunnel.error = 'The link is taking long to start — check your internet connection.'; tunnelEmit(); } }, 30000);
-  } catch (e) { tunnel.status = 'off'; tunnel.error = e.message; tunnelEmit(); }
+  } catch (e) { tunnel.status = 'off'; tunnel.error = e.message; tunnelLog('start failed: ' + e.message); tunnelEmit(); }
 }
-function tunnelStop() { tunnel.status = 'off'; tunnel.url = null; const p = tunnel.proc; tunnel.proc = null; if (p) p.kill(); tunnelEmit(); }
+function tunnelStop() { clearTimeout(tunnel.retryT); tunnel.retryT = null; tunnel.status = 'off'; tunnel.url = null; const p = tunnel.proc; tunnel.proc = null; if (p) p.kill(); tunnelEmit(); }
 ipcMain.handle('tunnel', async (e, op, opts = {}) => {
   if (op === 'start') { tunnelConf({ on: true }); tunnelStart(); }
   if (op === 'stop') { tunnelConf({ on: false }); tunnelStop(); }
@@ -420,15 +424,15 @@ ipcMain.handle('secret-set', (e, { key, value }) => { const s = readSecrets(); i
 ipcMain.handle('secret-has', (e, key) => !!readSecrets()[key]);
 
 // Orbit's requests to AI providers go from here (no browser CORS limits; keys never touch web pages)
-ipcMain.handle('llm', async (e, { url, headers = {}, body, keyName, keyHeader = 'Authorization', keyPrefix = 'Bearer ' }) => {
+ipcMain.handle('llm', async (e, { url, method = 'POST', headers = {}, body, keyName, keyHeader = 'Authorization', keyPrefix = 'Bearer ' }) => {
   if (!/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url)) return { ok: false, error: 'Only https:// or local AI endpoints are allowed' };
   const key = keyName ? readSecrets()[keyName] : null;
   if (keyName && !key) return { ok: false, error: 'No API key saved for this provider yet. Add it in Orbit settings.' };
   try {
-    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers, ...(key ? { [keyHeader]: keyPrefix + key } : {}) }, body: JSON.stringify(body) });
+    const r = await fetch(url, { method: method === 'GET' ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', ...headers, ...(key ? { [keyHeader]: keyPrefix + key } : {}) }, body: method === 'GET' ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(180000) });
     const t = await r.text();
     let j; try { j = JSON.parse(t); } catch { j = null; }
-    if (!r.ok) return { ok: false, error: (j && (j.error && (j.error.message || j.error))) || t.slice(0, 400) || ('HTTP ' + r.status) };
+    if (!r.ok) { const m = (j && (j.error && (j.error.message || j.error))) || t.slice(0, 400); return { ok: false, status: r.status, error: 'HTTP ' + r.status + (m ? ': ' + (typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 400) : '') }; }
     return { ok: true, data: j };
   } catch (err) { return { ok: false, error: err.message }; }
 });
@@ -457,6 +461,6 @@ app.whenReady().then(() => {
     shell: shellReq,
     onEvent: ev => win && win.webContents.send('agent-event', ev)
   });
-  if (tunnelConf().on) setTimeout(tunnelStart, 3000);   // reopen the connector link if it was on
+  if (tunnelConf().on) setTimeout(() => { tunnelLog('auto-start ' + tunnelConf().provider); tunnelStart(); }, 3000);   // reopen the connector link if it was on
 });
 app.on('window-all-closed', () => app.quit());

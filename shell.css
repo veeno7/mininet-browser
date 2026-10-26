@@ -255,3 +255,5 @@ textarea.inp{font:12px Consolas,monospace;min-height:120px;resize:vertical;user-
 #oTeam .dot.running{background:var(--teal);box-shadow:0 0 0 3px rgba(45,212,191,.25);animation:pulse 1.2s infinite}
 #oTeam .dot.done{background:#34d399}#oTeam .dot.failed{background:#fb7185}#oTeam .dot.stopped{background:#f59e0b}
 @keyframes pulse{50%{opacity:.45}}
+
+#views .tilelbl{position:absolute;z-index:5;pointer-events:none;color:#120b2a;font:700 11.5px/1 system-ui;padding:5px 9px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.35);max-width:60%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

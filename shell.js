@@ -11,7 +11,7 @@ function load(k, d) { try { const v = JSON.parse(localStorage.getItem('mb.' + k)
 function store(k, v) { try { localStorage.setItem('mb.' + k, JSON.stringify(v)); } catch {} }
 const settings = Object.assign({
   theme: 'sunset', engine: 'google', home: 'start', homeUrl: '', startup: 'restore',
-  adblock: true, datasaver: false, bookbar: true, sidebar: true
+  adblock: true, datasaver: false, bookbar: true, sidebar: true, followAI: true
 }, load('settings', {}));
 let bookmarks = load('bookmarks', [
   { url: 'mini://home.mini', title: 'MiniNet Chat' },
@@ -369,6 +369,7 @@ function showPanel(name) {
         <option value="home" ${settings.startup === 'home' ? 'selected' : ''}>Open the home page</option></select></div>
       <div class="set"><label>Block ads &amp; trackers <input type="checkbox" class="tog" id="sAd" ${settings.adblock ? 'checked' : ''}></label><small>Pages load faster and use less data. ${blocked.ad} blocked this session.</small></div>
       <div class="set"><label>Data saver <input type="checkbox" class="tog" id="sData" ${settings.datasaver ? 'checked' : ''}></label><small>Stops images and videos from loading to save mobile data. ${blocked.data} blocked this session.</small></div>
+      <div class="set"><label>Show what AIs are doing on my screen <input type="checkbox" class="tog" id="sFollow" ${settings.followAI ? 'checked' : ''}></label><small>The tab an AI is working in comes to the front; when several AIs work at once, Team view shows them all side by side.</small></div>
       <div class="set"><label>Show bookmarks bar <input type="checkbox" class="tog" id="sBar" ${settings.bookbar ? 'checked' : ''}></label></div>
       <div class="set"><label>Show sidebar <input type="checkbox" class="tog" id="sSide" ${settings.sidebar ? 'checked' : ''}></label></div>
       <div class="set"><b>Privacy</b>
@@ -384,6 +385,7 @@ function showPanel(name) {
     $('#sData').onchange = e => { settings.datasaver = e.target.checked; saveSettings(); toast(settings.datasaver ? 'Data saver on — reload pages to apply' : 'Data saver off'); };
     $('#sBar').onchange = e => { settings.bookbar = e.target.checked; saveSettings(); };
     $('#sSide').onchange = e => { settings.sidebar = e.target.checked; saveSettings(); };
+    $('#sFollow').onchange = e => { settings.followAI = e.target.checked; saveSettings(); };
     $('#sClrCache').onclick = async () => { await window.app.clearData('cache'); toast('Cache cleared'); };
     $('#sClrData').onclick = async () => { if (confirm('This signs you out of websites and erases MiniNet data too. Continue?')) { await window.app.clearData('all'); toast('Cookies & site data cleared'); tabs.forEach(t => t.wv.reload()); } };
     window.app.version().then(v => { const el = $('#ver'); if (el) el.textContent = 'v' + v; });
@@ -537,6 +539,7 @@ const AGENT_OPS = {
   list: () => tabs.map(tabInfo),
   open: async ({ url, background }) => { const t = newTab(url ? resolve(url) : undefined, { background }); await waitWc(t); return tabInfo(t); },
   owner: ({ id, name, color }) => { const t = tabs.find(x => x.id === id); if (!t) return false; t.agent = name || null; t.agentColor = color; t.wv.classList.toggle('work', !!name); renderTabs(); paintTeam(); return true; },
+  follow: ({ id }) => { followAI(id); return true; },
   peek: ({ id }) => { const t = tabs.find(x => x.id === id); if (!t) return false; t.wv.classList.add('work'); setTimeout(() => { if (!t.agent) t.wv.classList.remove('work'); }, 8000); return true; },
   navigate: ({ id, url }) => { const t = tabs.find(x => x.id === id); if (!t) throw new Error('No such tab'); t.wv.loadURL(resolve(url)).catch(() => {}); t.url = resolve(url); if (t === active) updateToolbar(); return true; },
   resolve: ({ url }) => resolve(url),
@@ -563,8 +566,37 @@ function paintTeam() {
   const b = $('#teamN'); if (b) { b.style.display = n ? 'block' : 'none'; b.textContent = n; }
   $('#bTeam').classList.toggle('active', teamView);
   $('#views').classList.toggle('grid', teamView);
+  setTimeout(labelTiles, 150);
 }
-$('#bTeam').onclick = () => { teamView = !teamView; paintTeam(); if (teamView && !tabs.some(t => t.agent)) toast('Team view: tabs where AIs are working appear here side by side'); };
+/* follow the AIs: whatever they do is shown on screen */
+const aiWork = new Map(); let autoTeam = false, lastHuman = 0;
+['mousedown', 'keydown'].forEach(ev => document.addEventListener(ev, () => { lastHuman = Date.now(); }, true));
+function workingTabs() { const now = Date.now(); return tabs.filter(t => t.agent && now - (aiWork.get(t.id) || 0) < 25000); }
+function followAI(id) {
+  aiWork.set(id, Date.now());
+  if (!settings.followAI) return;
+  const t = tabs.find(x => x.id === id); if (!t) return;
+  const busy = workingTabs();
+  if (busy.length >= 2) { if (!teamView) { teamView = true; autoTeam = true; paintTeam(); } }
+  else if (!teamView && active !== t && Date.now() - lastHuman > 4000) activate(t);
+  labelTiles();
+}
+setInterval(() => { if (autoTeam && teamView && workingTabs().length < 2 && Date.now() - lastHuman > 4000) { teamView = false; autoTeam = false; paintTeam(); const w = workingTabs()[0]; if (w && settings.followAI) activate(w); } labelTiles(); }, 3000);
+function labelTiles() {
+  document.querySelectorAll('#views .tilelbl').forEach(x => x.remove());
+  if (!teamView) return;
+  const vr = $('#views').getBoundingClientRect();
+  tabs.forEach(t => {
+    if (!t.wv.classList.contains('work') && t !== active) return;
+    const r = t.wv.getBoundingClientRect(); if (!r.width) return;
+    const l = document.createElement('div'); l.className = 'tilelbl';
+    l.style.cssText = `left:${r.left - vr.left + 8}px;top:${r.bottom - vr.top - 30}px;background:${t.agent ? (t.agentColor || '#2dd4bf') : 'var(--bg3)'}`;
+    l.textContent = (t.agent ? t.agent + ' · ' : 'You · ') + (t.title || '').slice(0, 40);
+    $('#views').appendChild(l);
+  });
+}
+window.addEventListener('resize', () => setTimeout(labelTiles, 100));
+$('#bTeam').onclick = () => { autoTeam = false; teamView = !teamView; paintTeam(); setTimeout(labelTiles, 150); if (teamView && !tabs.some(t => t.agent)) toast('Team view: tabs where AIs are working appear here side by side'); };
 function speak(text) {
   try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(String(text).replace(/[*_`#>]/g, '')); u.rate = 1.03; speechSynthesis.speak(u); } catch {}
 }
