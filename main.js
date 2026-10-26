@@ -429,12 +429,12 @@ ipcMain.handle('secret-set', (e, { key, value }) => { const s = readSecrets(true
 ipcMain.handle('secret-has', (e, key) => !!readSecrets()[key]);
 
 // Orbit's requests to AI providers go from here (no browser CORS limits; keys never touch web pages)
-ipcMain.handle('llm', async (e, { url, method = 'POST', headers = {}, body, keyName, keyHeader = 'Authorization', keyPrefix = 'Bearer ' }) => {
+ipcMain.handle('llm', async (e, { url, method = 'POST', headers = {}, body, keyName, keyHeader = 'Authorization', keyPrefix = 'Bearer ', timeoutMs = 180000 }) => {
   if (!/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url)) return { ok: false, error: 'Only https:// or local AI endpoints are allowed' };
   const key = keyName ? readSecrets()[keyName] : null;
   if (keyName && !key) return { ok: false, error: 'No API key saved for this provider yet. Add it in Orbit settings.' };
   try {
-    const r = await fetch(url, { method: method === 'GET' ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', ...headers, ...(key ? { [keyHeader]: keyPrefix + key } : {}) }, body: method === 'GET' ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(180000) });
+    const r = await fetch(url, { method: method === 'GET' ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', ...headers, ...(key ? { [keyHeader]: keyPrefix + key } : {}) }, body: method === 'GET' ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(Math.min(+timeoutMs || 180000, 900000)) });
     const t = await r.text();
     let j; try { j = JSON.parse(t); } catch { j = null; }
     if (!r.ok) { const m = (j && (j.error && (j.error.message || j.error))) || t.slice(0, 400); return { ok: false, status: r.status, error: 'HTTP ' + r.status + (m ? ': ' + (typeof m === 'string' ? m : JSON.stringify(m)).slice(0, 400) : '') }; }

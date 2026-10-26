@@ -156,7 +156,8 @@ function stepLabel(c) {
   return c.name.replace(/_/g, ' ');
 }
 
-async function systemPrompt() {
+async function systemPrompt(pk = orbit.provider) {
+  if (LOCAL_BRAINS.has(pk)) return localPrompt();
   const base = await window.app.agentInstructions();
   const tab = active ? `The user is currently looking at tab ${active.id}: "${active.title}" — ${display(active.url) || 'the start page'}.` : '';
   return `You are Orbit, the AI assistant built into MiniNet Browser. You act for the user inside their own browser using tools.
@@ -169,6 +170,13 @@ Only use ask_user when you need a choice the request didn't cover (which size, w
 ${orbit.instructions ? 'User\'s custom instructions: ' + orbit.instructions : ''}`;
 }
 
+// Short prompt for small local models (they read every token slowly on a laptop CPU)
+function localPrompt() {
+  // keep this text identical between steps so the local model can reuse its cache (no changing tab info here)
+  return `You are Orbit, an assistant that uses the user's web browser with tools.
+Steps: open_tab or navigate to a site, snapshot to see numbered elements, click/type using ref numbers, read_text to read. Do the whole task yourself, then answer in one or two short sentences.
+${orbit.instructions ? 'User notes: ' + orbit.instructions : ''}`;
+}
 async function getTools() { if (!toolDefs) toolDefs = await window.app.agentTools(); return toolDefs; }
 function contentText(content) { return (content || []).filter(c => c.type === 'text').map(c => c.text).join('\n'); }
 
@@ -231,18 +239,22 @@ async function ollamaPick() {
     const base = provUrl('ollama').replace(/\/v1\/chat\/completions.*$/, '');
     const r = await window.app.llm({ url: base + '/api/tags', method: 'GET' });
     const names = ((r.ok && r.data && r.data.models) || []).map(m => m.name);
-    if (!names.length || names.includes(modelName('ollama')) || names.includes(modelName('ollama') + ':latest')) return;
+    if (!names.length) return;
+    const tuned = names.find(n => /^orbit-/.test(n));   // a model set up for MiniNet (sized context) wins
+    if (tuned && modelName('ollama') !== tuned) { orbit.models.ollama = tuned; saveOrbit(); toast('Orbit is using your local model ' + tuned); return; }
+    if (names.includes(modelName('ollama')) || names.includes(modelName('ollama') + ':latest')) return;
     const pref = [/^qwen3/, /^qwen2\.5/, /^llama3\.[123]/, /^mistral/, /^gemma3/, /^granite/, /^phi4/, /./];
     for (const p of pref) { const m = names.find(n => p.test(n) && !/embed/i.test(n)); if (m) { orbit.models.ollama = m; saveOrbit(); toast('Orbit is using your local model ' + m); return; } }
   } catch {}
 }
 const LOCAL_BRAINS = new Set(['ollama', 'lmstudio']);
-const LITE_TOOLS = new Set(['list_tabs', 'open_tab', 'navigate', 'go_back', 'switch_tab', 'snapshot', 'read_text', 'click', 'type', 'press_key', 'scroll', 'wait_for', 'select_option', 'ask_user', 'answer_dialog', 'speak', 'start_helper', 'check_helpers']);
+const LITE_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'snapshot', 'read_text', 'click', 'type', 'press_key', 'scroll', 'ask_user']);
 // Ask one brain (provider) for the next step
 async function callBrain(pk, cv, sysExtra = '', exclude = null) {
-  const p = prov(pk), sys = (await systemPrompt()) + (sysExtra ? '\n' + sysExtra : '');
+  const p = prov(pk), sys = (await systemPrompt(pk)) + (sysExtra ? '\n' + sysExtra : '');
   let tools = await getTools(); if (exclude) tools = tools.filter(t => !exclude.has(t.name));
-  if (LOCAL_BRAINS.has(pk)) tools = tools.filter(t => LITE_TOOLS.has(t.name));   // small local models do better with fewer tools
+  if (LOCAL_BRAINS.has(pk)) tools = tools.filter(t => LITE_TOOLS.has(t.name)).map(t => ({ ...t, description: t.description.split(/(?<=\.)\s/)[0].slice(0, 140),
+    inputSchema: { ...t.inputSchema, properties: Object.fromEntries(Object.entries(t.inputSchema.properties || {}).map(([k, v]) => [k, { type: v.type, ...(v.items ? { items: v.items } : {}), ...(v.enum ? { enum: v.enum } : {}) }])) } }));   // small local models: fewer, shorter tools
   const url = provUrl(pk);
   if (!url) throw new Error('Set the API address for the custom provider in Orbit settings.');
   if (!modelName(pk)) throw new Error('Choose a model in Orbit settings.');
@@ -254,7 +266,7 @@ async function callBrain(pk, cv, sysExtra = '', exclude = null) {
   }
   if (pk === 'ollama') await ollamaPick();
   const extra = pk === 'openrouter' ? { 'HTTP-Referer': 'https://mininet.browser', 'X-Title': 'MiniNet Browser' } : {};
-  const r = await window.app.llm({ url, headers: extra, body: toOpenAI(sys, tools, cv, pk), keyName: p.key ? 'key.' + pk : null });
+  const r = await window.app.llm({ url, headers: extra, body: toOpenAI(sys, tools, cv, pk), keyName: p.key ? 'key.' + pk : null, timeoutMs: LOCAL_BRAINS.has(pk) ? 900000 : 180000 });
   if (!r.ok) {
     if ((pk === 'ollama' || pk === 'lmstudio') && /fetch failed|ECONNREFUSED/i.test(r.error)) throw new Error(p.name.split(' (')[0] + ' is not running. Start it on this computer (and pull a model that supports tools, e.g. "ollama pull qwen2.5:7b").');
     throw new Error(r.error);
