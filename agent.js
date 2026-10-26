@@ -351,6 +351,18 @@ const TOOLS = {
         if (focusOk.startsWith('covered:')) throw new Error('The click did not land in that field (focus went to ' + focusOk.slice(8) + '). Something may be covering it — take a snapshot, close any popup, then try again.');
         if (!a.append) await fjs(p.frame, `(() => { const e = document.activeElement; if (!e) return; if ('value' in e && typeof e.select === 'function') { e.select(); } else { document.execCommand('selectAll'); } })()`).catch(() => {});
       }
+      if (a.ref == null && !a.selector && !a.field) {
+        // typing with nothing focused freezes some pages: make sure a text field has the cursor first
+        const focus = await Promise.race([js(wc, `(() => { const ok = e => e && (e.isContentEditable || /^(INPUT|TEXTAREA)$/.test(e.tagName) || /textbox|searchbox|combobox/.test(e.getAttribute('role') || ''));
+          let f = document.activeElement; while (f && f.shadowRoot && f.shadowRoot.activeElement && f.shadowRoot.activeElement !== f) f = f.shadowRoot.activeElement; if (ok(f)) return 'ok';
+          const vis = e => { const r = e.getBoundingClientRect(); return r.width > 20 && r.height > 8 && r.bottom > 0 && r.top < innerHeight && getComputedStyle(e).visibility !== 'hidden'; };
+          const s = [...document.querySelectorAll('input[type=search],input[name=search],input[name=q],input[name=query],[role=searchbox],[role=combobox],input[placeholder*=earch i],input[aria-label*=earch i]')].find(vis);
+          if (!s) return 'none'; const r = s.getBoundingClientRect(); return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 }); })()`).catch(() => 'none'), sleep(4000).then(() => 'none')]);
+        if (focus !== 'ok') {
+          if (focus === 'none') throw new Error('No text field has the cursor, so there is nowhere to type. Click the field first (or pass ref/field), then type. If the search box is hidden behind a search icon, click the icon first.');
+          const pt = JSON.parse(focus); await mouseClick(wc, { x: pt.x, y: pt.y }); await sleep(150);
+        }
+      }
       if (a.submit === 'auto') a.submit = await Promise.race([js(wc, `(() => { let e = document.activeElement; while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement; if (!e) return false; const s = [e.type, e.name, e.id, e.placeholder, e.getAttribute('aria-label'), e.getAttribute('role')].join(' '); return e.type === 'search' || /searchbox|combobox/.test(e.getAttribute('role') || '') || /search|query|\\bq\\b/i.test(s); })()`).catch(() => false), sleep(3000).then(() => false)]);
       await Promise.race([Promise.resolve(wc.insertText(String(a.text))), sleep(3000)]);
       if ((a.ref != null || a.selector || a.field) && String(a.text).length) {
