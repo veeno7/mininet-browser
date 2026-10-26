@@ -351,14 +351,14 @@ const TOOLS = {
         if (focusOk.startsWith('covered:')) throw new Error('The click did not land in that field (focus went to ' + focusOk.slice(8) + '). Something may be covering it — take a snapshot, close any popup, then try again.');
         if (!a.append) await fjs(p.frame, `(() => { const e = document.activeElement; if (!e) return; if ('value' in e && typeof e.select === 'function') { e.select(); } else { document.execCommand('selectAll'); } })()`).catch(() => {});
       }
-      wc.insertText(String(a.text));
+      if (a.submit === 'auto') a.submit = await Promise.race([js(wc, `(() => { let e = document.activeElement; while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement; if (!e) return false; const s = [e.type, e.name, e.id, e.placeholder, e.getAttribute('aria-label'), e.getAttribute('role')].join(' '); return e.type === 'search' || /searchbox|combobox/.test(e.getAttribute('role') || '') || /search|query|\\bq\\b/i.test(s); })()`).catch(() => false), sleep(3000).then(() => false)]);
+      await Promise.race([Promise.resolve(wc.insertText(String(a.text))), sleep(3000)]);
       if ((a.ref != null || a.selector || a.field) && String(a.text).length) {
         await sleep(40);
         const tail = String(a.text).slice(-12);
         const landed = await js(wc, `(() => { let f = document.activeElement; while (f && f.shadowRoot && f.shadowRoot.activeElement) f = f.shadowRoot.activeElement; if (!f || f === document.body || f === document.documentElement) return 'none'; if (f.tagName === 'IFRAME') return 'frame'; const v = ('value' in f ? f.value : f.innerText) || ''; return v.includes(${JSON.stringify(tail)}) ? 'ok' : 'other:' + f.tagName.toLowerCase(); })()`).catch(() => 'ok');
         if (landed === 'none') throw new Error('Nothing took the typing — that field is probably hidden or collapsed. Click the button that opens it first (for example a search icon), then type again.');
       }
-      if (a.submit === 'auto') a.submit = await js(wc, `(() => { let e = document.activeElement; while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement; if (!e) return false; const s = [e.type, e.name, e.id, e.placeholder, e.getAttribute('aria-label'), e.getAttribute('role')].join(' '); return e.type === 'search' || /searchbox|combobox/.test(e.getAttribute('role') || '') || /search|query|\\bq\\b/i.test(s); })()`).catch(() => false);
       if (a.submit) { await sleep(80); pressKey(wc, 'Enter'); await waitLoad(wc, 15000, 1200); }
       return text({ typed: a.text.length + ' characters', submitted: !!a.submit, url: displayUrl(wc.getURL()) });
     }

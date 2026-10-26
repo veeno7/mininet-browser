@@ -1,7 +1,7 @@
 {
   "name": "mininet-browser",
   "productName": "MiniNet Browser",
-  "version": "1.10.7",
+  "version": "1.10.8",
   "description": "MiniNet Browser \u2014 the browser any AI can use as its eyes and hands.",
   "main": "main.js",
   "author": "Seyi",
