@@ -807,7 +807,7 @@ async function renderBusiness(body) {
       <label>Note for clients<input class="inp" id="bzANote" value="${esc(s.payment.note)}" placeholder="e.g. Send your name as the transfer narration"></label></div>
     <div class="set"><b>Payment checking (Gmail bank alerts)</b><small>A payment only counts when a credit alert email from one of these senders shows the exact amount. Turn on email alerts in your bank app for the account above.</small>
       <label>Trusted alert senders (one per line; @domain allows the whole domain)<textarea class="inp" id="bzSend" rows="3">${esc(s.alertSenders.join('\n'))}</textarea></label>
-      <label>Gmail account number (0 = first signed-in account)<input class="inp" id="bzGm" type="number" value="${s.gmailAccount}"></label>
+      <label>Which Gmail gets your bank alerts (all, an email, or account number)<input class="inp" id="bzGm" value="${esc(String(s.gmailAccount))}"></label>
       <label>Also ask me to confirm payments of this amount or more<input class="inp" id="bzBig" type="number" value="${s.ownerConfirmAbove}"></label>
       <button class="btn sm" id="bzTest">Test: read my latest alerts</button><div id="bzTestOut"></div></div>
     <div class="set"><b>Budget for spending (ads, tools)</b><small>AIs only record spending inside these limits; anything above needs your OK. 0 = always ask.</small>
@@ -830,7 +830,7 @@ async function renderBusiness(body) {
   $('#bzSave').onclick = async () => {
     await window.app.business('save', { businessName: v('bzName'), offer: v('bzOffer'), rules: v('bzRules'), minPricePercent: Math.max(1, Math.min(100, +v('bzMin') || 80)), currency: v('bzCur') || 'NGN',
       payment: { bank: v('bzBank'), accountName: v('bzAName'), accountNumber: v('bzANum'), note: v('bzANote') },
-      alertSenders: v('bzSend'), gmailAccount: +v('bzGm') || 0, ownerConfirmAbove: +v('bzBig') || 0,
+      alertSenders: v('bzSend'), gmailAccount: (v('bzGm') || 'all').trim(), ownerConfirmAbove: +v('bzBig') || 0,
       budget: { monthly: +v('bzBud') || 0, perExpense: +v('bzPer') || 0 },
       watch: { gmail: $('#bzWG').checked, whatsapp: $('#bzWW').checked, everySeconds: Math.max(20, +v('bzEvery') || 60) },
       autopilot: { on: $('#bzAP').checked, playbook: v('bzPlay'), maxRunsPerHour: Math.max(1, +v('bzMax') || 12) } });
@@ -846,14 +846,78 @@ async function renderAccounts(body) {
   body.innerHTML = `
     <div class="set"><b>Sign in once — stay signed in</b><small>Sign in to a site one time in MiniNet Browser and you stay signed in, even after closing it. Sites with <b>Continue with Google</b> then take one click — for you and for your AIs (they choose your Google account, and never type passwords).</small></div>
     <div class="set"><b>Google accounts</b>
-      ${a.google.length ? a.google.map(g => `<div class="pi"><img src="https://www.google.com/s2/favicons?sz=64&domain=google.com"><div class="tx"><div>${esc(g.email)}</div><small>${esc(g.name || '')}</small></div><span class="ok">● signed in</span></div>`).join('') : '<small>No Google account yet.</small>'}
+      <small>Sign in to as many Gmail accounts as you like — they all stay signed in, and AIs can use any of them (codes, payment alerts, YouTube, Drive…). You type the password; AIs never do.</small>
+      ${a.google.length ? a.google.map(g => `<div class="pi"><img src="https://www.google.com/s2/favicons?sz=64&domain=google.com"><div class="tx"><div>${esc(g.email)}</div><small>${esc(g.name || '')} · account ${g.index}</small></div><button class="btn sm" data-open="https://mail.google.com/mail/u/${g.index}/">Gmail</button></div>`).join('') : '<small>No Google account yet.</small>'}
       <button class="btn sun wide" id="acAddG" style="margin-top:8px">${a.google.length ? '+ Add another Google account' : 'Sign in with Google'}</button></div>
     <div class="set"><b>Sites</b>
       ${a.sites.filter(s => s.id !== 'google').map(s => `<div class="pi"><img src="https://www.google.com/s2/favicons?sz=64&domain=${esc(new URL(s.url).hostname)}"><div class="tx"><div>${esc(s.name)}</div><small>${s.signedIn ? '<span class="ok">● signed in</span>' : 'not signed in'}</small></div>
         ${s.signedIn ? `<button class="btn sm" data-open="${esc(s.url)}">Open</button>${s.id !== 'whatsapp' ? ` <button class="btn sm" data-out="${esc(s.id)}" title="Sign out of ${esc(s.name)} in this browser">Sign out</button>` : ''}` : `<button class="btn sun sm" data-open="${esc(s.login)}">Sign in</button>`}</div>`).join('')}
       <button class="btn wide" id="acRe" style="margin-top:8px">Refresh</button></div>`;
-  $('#acAddG').onclick = () => newTab(a.google.length ? 'https://accounts.google.com/AddSession' : 'https://accounts.google.com/ServiceLogin');
+  $('#acAddG').onclick = () => newTab(a.google.length ? 'https://accounts.google.com/AddSession?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F' : 'https://accounts.google.com/ServiceLogin');
   $('#acRe').onclick = () => renderAccounts(body);
   body.querySelectorAll('[data-open]').forEach(b => b.onclick = () => newTab(b.dataset.open));
   body.querySelectorAll('[data-out]').forEach(b => b.onclick = async () => { if (!confirm('Sign out of this site in MiniNet Browser?')) return; await window.app.accountSignout(b.dataset.out); toast('Signed out'); renderAccounts(body); });
+}
+
+/* ================= Codex chat ================= */
+PANELS.codex = { title: 'Codex', render: renderCodex, wide: true };
+let codexLog = load('codexChat', []);   // [{who:'me'|'codex'|'act'|'err', text}]
+let codexBusy = false;
+function codexSave() { codexLog = codexLog.slice(-300); store('codexChat', codexLog); }
+function codexPaint() {
+  const box = $('#cxLog'); if (!box) return;
+  box.innerHTML = codexLog.length ? codexLog.map(m => m.who === 'me' ? `<div class="cx me">${esc(m.text)}</div>`
+    : m.who === 'act' ? `<div class="cx act">${esc(m.text)}</div>`
+    : m.who === 'err' ? `<div class="cx err">${esc(m.text)}</div>`
+    : m.who === 'think' ? `<div class="cx think">${esc(m.text)}</div>`
+    : `<div class="cx ai">${esc(m.text).replace(/\n/g, '<br>')}</div>`).join('') + (codexBusy ? '<div class="cx think">Codex is working…</div>' : '')
+    : `<div class="cx think">Ask Codex to do something in this browser — for example "check my Gmail for new client emails", "find the 3 newest afrobeats videos on YouTube", or "make a short video in Google Flow and edit it in CapCut". It uses your ChatGPT plan.</div>`;
+  box.scrollTop = box.scrollHeight;
+  const b = $('#cxSend'); if (b) b.textContent = codexBusy ? 'Stop' : 'Send';
+}
+function actLine(it, phase) {
+  if (it.type === 'mcp_tool_call') return `🧭 ${it.server || ''} · ${it.tool || ''}${phase === 'done' ? (it.status === 'failed' || it.error ? ' ✗' : ' ✓') : ' …'}`;
+  if (it.type === 'command_execution') return `⌨ ${String(it.command || '').slice(0, 160)}${phase === 'done' ? (it.exit_code ? ' ✗ (exit ' + it.exit_code + ')' : ' ✓') : ' …'}`;
+  if (it.type === 'file_change') return `📝 changed ${(it.changes || []).map(c => c.path).join(', ').slice(0, 160)}`;
+  if (it.type === 'web_search') return `🔎 ${it.query || 'web search'}`;
+  if (it.type === 'todo_list') return '☑ ' + (it.items || []).map(x => (x.completed ? '✓ ' : '· ') + x.text).join('  ');
+  return null;
+}
+window.app.on('codex-event', ev => {
+  if (ev.type === 'start') codexBusy = true;
+  else if (ev.type === 'item.completed' && ev.item) {
+    const it = ev.item;
+    if (it.type === 'agent_message' && it.text) codexLog.push({ who: 'codex', text: it.text });
+    else if (it.type === 'reasoning' && it.text) codexLog.push({ who: 'think', text: it.text.slice(0, 400) });
+    else if (it.type === 'error') codexLog.push({ who: 'err', text: it.message || 'error' });
+    else { const l = actLine(it, 'done'); if (l) { let i = -1; for (let k = codexLog.length - 1; k >= 0; k--) { if (codexLog[k].who === 'me') break; if (codexLog[k].id === it.id) { i = k; break; } } /* ids restart each turn: only look in the current turn */ if (i >= 0) codexLog[i] = { who: 'act', id: it.id, text: l }; else codexLog.push({ who: 'act', id: it.id, text: l }); } }
+  } else if (ev.type === 'item.started' && ev.item) { const l = actLine(ev.item, 'start'); if (l) codexLog.push({ who: 'act', id: ev.item.id, text: l }); }
+  else if (ev.type === 'turn.failed' || ev.type === 'error') codexLog.push({ who: 'err', text: (ev.error && ev.error.message) || ev.message || 'Codex error' });
+  else if (ev.type === 'end') { codexBusy = false; if (ev.error) codexLog.push({ who: 'err', text: ev.error }); if (!panelOpen || panelOpen !== 'codex') toast('Codex finished'); }
+  codexSave(); if (panelOpen === 'codex') codexPaint();
+});
+async function renderCodex(body) {
+  const st = await window.app.codex('status'); codexBusy = st.running;
+  body.innerHTML = `<style>
+    #cxLog{height:calc(100vh - 250px);overflow:auto;padding:4px 2px;display:flex;flex-direction:column;gap:6px}
+    .cx{padding:8px 10px;border-radius:10px;font-size:13px;line-height:1.45;max-width:92%;white-space:normal;word-wrap:break-word}
+    .cx.me{align-self:flex-end;background:var(--sun,#f59e0b);color:#111}
+    .cx.ai{align-self:flex-start;background:var(--card,#1f2430)}
+    .cx.act{align-self:flex-start;font-size:11.5px;opacity:.75;padding:2px 10px;font-family:ui-monospace,monospace}
+    .cx.think{align-self:flex-start;font-size:11.5px;opacity:.6;font-style:italic}
+    .cx.err{align-self:flex-start;background:#4c1d1d;color:#fecaca}</style>
+    <div class="set" style="padding-bottom:6px"><small>Chat with <b>OpenAI Codex</b> on this laptop. It works mainly in this browser (through MiniNet's tools) and can also use files in <code>${esc(st.dir)}</code>. ${st.exe ? '' : '<span class="bad">Codex CLI not found — install Codex and sign in.</span>'} It asks you (Allow cards) before acting, like other AIs.</small></div>
+    <div id="cxLog"></div>
+    <div style="display:flex;gap:6px;margin-top:8px"><textarea class="inp" id="cxIn" rows="2" placeholder="Tell Codex what to do…" style="margin:0;flex:1"></textarea>
+      <div style="display:flex;flex-direction:column;gap:4px"><button class="btn sun" id="cxSend">Send</button><button class="btn sm" id="cxNew" title="Start a new conversation">New chat</button></div></div>`;
+  codexPaint();
+  const send = async () => {
+    if (codexBusy) { await window.app.codex('stop'); return; }
+    const t = $('#cxIn').value.trim(); if (!t) return;
+    $('#cxIn').value = ''; codexLog.push({ who: 'me', text: t }); codexBusy = true; codexSave(); codexPaint();
+    try { await window.app.codex('send', { text: t }); } catch (e) { codexBusy = false; codexLog.push({ who: 'err', text: e.message }); codexSave(); codexPaint(); }
+  };
+  $('#cxSend').onclick = send;
+  $('#cxIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
+  $('#cxNew').onclick = async () => { if (codexBusy) return toast('Wait for Codex to finish, or press Stop'); await window.app.codex('new'); codexLog = []; codexSave(); codexPaint(); toast('New Codex chat'); };
 }

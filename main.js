@@ -591,12 +591,45 @@ async function accountsStatus() {
     try {
       const r = await ses.fetch('https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard', { method: 'POST' });
       const t = await r.text(); const j = JSON.parse(t.replace(/^\)\]\}'/, ''));
-      google = (j[1] || []).map(a => ({ name: a[2] || '', email: a[3] || '', signedOut: !!a[14] })).filter(a => a.email && !a.signedOut);
+      // keep each account's position: it is the number Google sites use (/u/0, /u/1 … or ?authuser=)
+      google = (j[1] || []).map((a, i) => ({ name: a[2] || '', email: a[3] || '', index: typeof a[7] === 'number' ? a[7] : i, signedOut: !!a[14] })).filter(a => a.email && !a.signedOut);
     } catch {}
   }
   return { sites: out, google };
 }
 ipcMain.handle('accounts', () => accountsStatus());
+/* ---------------- Codex chat (OpenAI Codex CLI on this laptop, driving MiniNet through its MCP tools) ---------------- */
+const codexRun = { proc: null, thread: null };
+function codexDir() { const d = path.join(app.getPath('home'), 'MiniNetCodex'); fs.mkdirSync(d, { recursive: true }); return d; }
+function codexExe() {
+  const cands = [path.join(process.env.LOCALAPPDATA || '', 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe'), 'codex'];
+  return cands.find(c => c === 'codex' || fs.existsSync(c));
+}
+function codexSend(ev) { win && !win.isDestroyed() && win.webContents.send('codex-event', ev); }
+ipcMain.handle('codex', async (e, op, a = {}) => {
+  if (op === 'status') { try { codexRun.thread = codexRun.thread || fs.readFileSync(path.join(codexDir(), '.mininet-thread'), 'utf8').trim() || null; } catch {} return { running: !!codexRun.proc, thread: codexRun.thread, exe: codexExe(), dir: codexDir() }; }
+  if (op === 'new') { codexRun.thread = null; try { fs.unlinkSync(path.join(codexDir(), '.mininet-thread')); } catch {} return true; }
+  if (op === 'stop') { const p = codexRun.proc; if (p) { if (process.platform === 'win32') execFile('taskkill', ['/T', '/F', '/PID', String(p.pid)], () => {}); else p.kill(); } return true; }
+  if (op !== 'send') return null;
+  if (codexRun.proc) throw new Error('Codex is still working — wait or press Stop.');
+  const prompt = String(a.text || '').trim(); if (!prompt) return false;
+  const common = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"', ...(a.model ? ['-m', String(a.model)] : [])];
+  const args = codexRun.thread ? ['exec', 'resume', codexRun.thread, ...common, '-'] : ['exec', ...common, '-C', codexDir(), '-'];
+  const p = spawn(codexExe(), args, { cwd: codexDir(), windowsHide: true, env: process.env });
+  codexRun.proc = p; codexSend({ type: 'start' });
+  p.stdin.end(prompt);
+  let buf = '', err = '';
+  p.stdout.on('data', d => {
+    buf += String(d); const lines = buf.split('\n'); buf = lines.pop();
+    for (const l of lines) { let j; try { j = JSON.parse(l); } catch { continue; }
+      if (j.type === 'thread.started' && j.thread_id) { codexRun.thread = j.thread_id; try { fs.writeFileSync(path.join(codexDir(), '.mininet-thread'), j.thread_id); } catch {} }
+      codexSend(j); }
+  });
+  p.stderr.on('data', d => { err += String(d); if (err.length > 4000) err = err.slice(-4000); });
+  p.on('error', er => { codexRun.proc = null; codexSend({ type: 'error', message: 'Could not start Codex: ' + er.message + '. Is the Codex CLI installed and signed in?' }); });
+  p.on('exit', code => { codexRun.proc = null; const tail = err.split('\n').filter(x => x.trim() && !/Reading additional input/.test(x)).slice(-3).join(' '); codexSend({ type: 'end', code, error: code ? (tail || 'Codex stopped (code ' + code + ')') : '' }); });
+  return true;
+});
 ipcMain.handle('business', async (e, op, a = {}) => {
   const biz = agent.biz;
   if (op === 'data') return biz.panelData();

@@ -8,7 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { BrowserWindow, session, webContents } = require('electron');
 
-let dir = '', shellReq = null, notify = () => {}, partition = 'persist:main';
+let dir = '', shellReq = null, notify = () => {}, partition = 'persist:main', gIdx = async w => [w == null || w === 'all' ? 0 : +w || 0], gList = async () => [];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const now = () => Date.now();
 const id = p => p + '_' + crypto.randomBytes(5).toString('hex');
@@ -33,7 +33,7 @@ const DEFAULT_SETTINGS = {
   minPricePercent: 80,       // lowest price an AI may agree to, as % of list price
   payment: { bank: '', accountName: '', accountNumber: '', note: '' },  // shared with a client only for an agreed deal
   alertSenders: ['no-reply@moniepoint.com', '@opay-nigeria.com', '@opayweb.com', '@opay.ng'],
-  gmailAccount: 0,           // which signed-in Google account gets the bank alerts (u/0, u/1, ...)
+  gmailAccount: 'all',       // which signed-in Gmail gets the bank alerts: 'all', an email, or a number (u/0, u/1 …)
   ownerConfirmAbove: 100000, // payments at or above this also need the owner to confirm in the bank app
   budget: { monthly: 0, perExpense: 0 },   // 0 = no spending allowed without asking
   watch: { gmail: true, whatsapp: true, everySeconds: 60 },
@@ -97,8 +97,15 @@ function gmailWindow() {
 }
 async function gmailRun(fn) { const p = gmailBusy.then(fn, fn); gmailBusy = p.catch(() => {}); return p; }
 async function gmailSearch(query, { open = 5, account } = {}) {
+  // search every chosen Gmail account, newest results first
+  const which = account != null && account !== '' ? account : settings().gmailAccount;
+  const idx = await gIdx(which);
+  const merged = { rows: [], opened: [] };
+  for (const u of idx) { const r = await gmailSearchOne(query, { open, u }); r.rows.forEach(x => x.gmail = u); r.opened.forEach(x => x.gmail = u); merged.rows.push(...r.rows); merged.opened.push(...r.opened); }
+  return merged;
+}
+async function gmailSearchOne(query, { open = 5, u = 0 } = {}) {
   return gmailRun(async () => {
-    const s = settings(), u = account != null ? account : s.gmailAccount || 0;
     const w = gmailWindow(), wc = w.webContents;
     const url = `https://mail.google.com/mail/u/${u}/#search/${encodeURIComponent(query)}`;
     if (!/mail\.google\.com\/mail\/u\/\d+\//.test(wc.getURL()) || !wc.getURL().includes(`/u/${u}/`)) { await wc.loadURL(url).catch(() => {}); }
@@ -130,7 +137,7 @@ async function gmailSearch(query, { open = 5, account } = {}) {
           return { body: b.innerText, from: s ? s.getAttribute('email') : '', when: t ? (t.title || t.innerText) : '' }; })()`).catch(() => null);
       }
       const shot = got ? await wc.capturePage().then(img => img.toPNG()).catch(() => null) : null;
-      out.push({ ...r, from: (got && got.from) || r.from, date: (got && got.when) || r.date, messageId: r.thread || ('row' + r.i + ':' + r.date), body: got ? got.body.slice(0, 6000) : '', shot });
+      out.push({ ...r, from: (got && got.from) || r.from, date: (got && got.when) || r.date, messageId: (r.thread ? 'u' + u + ':' + r.thread : 'u' + u + ':row' + r.i + ':' + r.date), body: got ? got.body.slice(0, 6000) : '', shot });
     }
     await ev(`location.hash = ${JSON.stringify('#search/' + encodeURIComponent(query))}; 1`).catch(() => {});
     return { rows, opened: out };
@@ -161,7 +168,7 @@ function trustedSender(from) {
   return settings().alertSenders.some(s => s.startsWith('@') ? f.endsWith(s) : f === s);
 }
 
-async function verifyPayment({ amount, deal_id, reference, payer, since_hours = 48, debug = false, dry_run = false }, who) {
+async function verifyPayment({ amount, deal_id, reference, payer, since_hours = 48, debug = false, dry_run = false, gmail }, who) {
   const s = settings(), d = db();
   const deal = deal_id ? d.deals.find(x => x.id === deal_id) : null;
   if (deal_id && !deal) throw new Error('No deal with id ' + deal_id);
@@ -169,7 +176,7 @@ async function verifyPayment({ amount, deal_id, reference, payer, since_hours = 
   if (!want) throw new Error('Give the expected amount (or a deal_id that has an amount).');
   const senders = s.alertSenders.map(x => x.startsWith('@') ? x.slice(1) : x);
   const q = `(${senders.map(x => 'from:' + x).join(' OR ')}) newer_than:${Math.max(1, Math.ceil(since_hours / 24))}d`;
-  const r = await gmailSearch(q, { open: 8 });
+  const r = await gmailSearch(q, { open: 8, account: gmail });
   const l = ledger();
   const checked = [];
   for (const m of r.opened) {
@@ -214,18 +221,24 @@ function pushEvent(e) {
   maybeAutopilot(ev);
 }
 async function checkGmail() {
-  const s = settings();
-  const r = await session.fromPartition(partition).fetch(`https://mail.google.com/mail/u/${s.gmailAccount || 0}/feed/atom`).catch(() => null);
+  for (const u of await gIdx(settings().gmailAccount)) await checkGmailOne(u);
+  gmailFirst = false;
+}
+let gmailFirst = true;
+async function checkGmailOne(u) {
+  const r = await session.fromPartition(partition).fetch(`https://mail.google.com/mail/u/${u}/feed/atom`).catch(() => null);
   if (!r || !r.ok) return;
   const xml = await r.text();
+  const acct = (xml.match(/<title>Gmail - Inbox for ([^<]+)<\/title>/) || [])[1] || 'Gmail ' + u;
   const dec = x => String(x || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
   const items = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].map(m => { const g = k => dec((m[1].match(new RegExp(`<${k}>([\\s\\S]*?)</${k}>`)) || [])[1]); return { id: g('id'), subject: g('title'), from: g('email'), name: g('name'), summary: g('summary') }; });
-  if (lastGmailIds === null) { lastGmailIds = new Set(items.map(i => i.id)); return; }   // first look: remember what is already there
+  if (lastGmailIds === null) lastGmailIds = new Set();
+  if (gmailFirst) { items.forEach(i => lastGmailIds.add(i.id)); return; }   // first look: remember what is already there
   for (const i of items) {
     if (lastGmailIds.has(i.id)) continue;
     lastGmailIds.add(i.id);
     const bank = trustedSender(i.from) && /credit/i.test(i.subject + ' ' + i.summary);
-    pushEvent({ type: bank ? 'payment_alert' : 'email', from: i.from, name: i.name, subject: i.subject, preview: i.summary.slice(0, 200), untrusted: !bank });
+    pushEvent({ type: bank ? 'payment_alert' : 'email', gmail: acct, from: i.from, name: i.name, subject: i.subject, preview: i.summary.slice(0, 200), untrusted: !bank });
   }
 }
 let waFirst = true, waOpenedAt = 0, waState = 'not checked';
@@ -349,7 +362,7 @@ const TOOLS = {
   verify_payment: {
     level: 'business',
     description: 'Check the owner\'s Gmail for a REAL bank credit alert (only trusted bank senders) with the exact amount, optionally matching a reference or payer name, not used for any earlier payment. Marks the deal paid and records income. A client\'s screenshot or message is never proof — only this check is. Big amounts also need the owner to confirm in the bank app.',
-    schema: { amount: { type: 'number' }, deal_id: { type: 'string' }, reference: { type: 'string' }, payer: { type: 'string', description: 'Name the client paid from, if known' }, since_hours: { type: 'integer' }, dry_run: { type: 'boolean', description: 'Only check, record nothing' } },
+    schema: { amount: { type: 'number' }, deal_id: { type: 'string' }, reference: { type: 'string' }, payer: { type: 'string', description: 'Name the client paid from, if known' }, since_hours: { type: 'integer' }, dry_run: { type: 'boolean', description: 'Only check, record nothing' }, gmail: { type: 'string', description: 'Which Gmail gets the bank alerts (email or number). Default: the one set in Business, or all.' } },
     run: async (a, who) => {
       const r = await verifyPayment(a, who); const shot = r.screenshot; delete r.screenshot;
       return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }, ...(shot ? [{ type: 'image', data: shot, mimeType: 'image/png' }] : [])] };
@@ -421,7 +434,7 @@ const TOOLS = {
 
 function init(opts) {
   dir = path.join(opts.userData, 'business'); fs.mkdirSync(dir, { recursive: true });
-  shellReq = opts.shellReq; notify = opts.notify || notify; partition = opts.partition || partition;
+  shellReq = opts.shellReq; notify = opts.notify || notify; partition = opts.partition || partition; if (opts.googleIndexes) gIdx = opts.googleIndexes; if (opts.googleAccounts) gList = opts.googleAccounts;
   try { const old = fs.readFileSync(file('events.jsonl'), 'utf8').trim().split('\n').slice(-200).map(l => JSON.parse(l)); events.push(...old); evSeq = old.length ? old[old.length - 1].id : 0; } catch {}
   restartWatch();
 }
