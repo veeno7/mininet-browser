@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('app', {
   accounts: () => ipcRenderer.invoke('accounts'),
   ngrokTokenFromPage: () => ipcRenderer.invoke('ngrok-token-from-page'),
   readClipboard: () => ipcRenderer.invoke('clipboard-read'),
+  business: (op, a) => ipcRenderer.invoke('business', op, a),
   accountSignout: (id) => ipcRenderer.invoke('account-signout', id),
   agentRelease: (key) => ipcRenderer.invoke('agent-release', key),
   pageDialogAnswer: (id, value) => ipcRenderer.send('page-dialog-answer', { id, value }),

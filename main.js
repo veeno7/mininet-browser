@@ -362,23 +362,27 @@ async function tunnelStart() {
     if (conf.provider === 'ngrok') {
       const key = getNgrokKey();
       if (!key) throw new Error('Paste your free ngrok authtoken first.');
+      const dom = cleanDomain(conf.domain);
+      // a link that is still running from before (MiniNet restarted): keep using it, no gap for connected AIs
+      const live = await ngrokApi();
+      if (live && live.url && (!dom || live.url.includes(dom)) && live.port === String(port)) { tunnelAdopt(live.url, 'reused running link'); return; }
+      if (live) await ngrokKill();
       const exe = await ensureNgrok();
       tunnel.status = 'starting'; tunnelEmit();
-      const args = ['http', `127.0.0.1:${port}`, '--host-header=rewrite', '--log=stdout', '--log-format=json', '--pooling-enabled'];
-      const dom = cleanDomain(conf.domain);
+      const logf = path.join(app.getPath('userData'), 'ngrok.log'); try { fs.writeFileSync(logf, ''); } catch {}
+      // ngrok's local status page (used to check the link and to find it again after a restart) is set in a config file
+      const cfgf = path.join(app.getPath('userData'), 'ngrok-mininet.yml');
+      fs.writeFileSync(cfgf, `version: "3"\nagent:\n  web_addr: 127.0.0.1:${NGROK_API_PORT}\n`);
+      const args = ['http', `127.0.0.1:${port}`, '--host-header=rewrite', `--config=${cfgf}`, `--log=${logf}`, '--log-format=json', '--pooling-enabled'];
       if (dom) args.push('--url=https://' + dom);
-      p = spawn(exe, args, { windowsHide: true, env: Object.assign({}, process.env, { NGROK_AUTHTOKEN: key }) });
-      let buf = '';
-      const onData = d => {
-        buf += String(d); const lines = buf.split('\n'); buf = lines.pop();
-        for (const line of lines) {
-          let j; try { j = JSON.parse(line); } catch { if (line.trim()) { tunnelLog('ngrok: ' + line); if (/ERR_NGROK|error/i.test(line)) { tunnel.error = line.trim().slice(0, 300); tunnelEmit(); } } continue; }
-          if (j.url && /^https:/.test(j.url) && !tunnel.url) { tunnelLog('online ' + j.url); tunnel.tries = 0; tunnel.url = j.url.replace(/\/$/, ''); tunnel.status = 'on'; if (!dom) tunnelConf({ domain: cleanDomain(tunnel.url) }); tunnelEmit(); }
-          if (j.lvl === 'eror' || j.lvl === 'crit' || j.lvl === 'warn') tunnelLog(line);
-          if (j.lvl === 'eror' || j.lvl === 'crit') { tunnel.error = String(j.err || j.msg || 'ngrok error').replace(/\s+/g, ' ').slice(0, 300); tunnelEmit(); }
-        }
-      };
-      p.stdout.on('data', onData); p.stderr.on('data', onData);
+      // detached: the link keeps running while MiniNet restarts (updates), so AI connectors don't drop
+      const p = spawn(exe, args, { windowsHide: true, detached: true, stdio: 'ignore', env: Object.assign({}, process.env, { NGROK_AUTHTOKEN: key }) });
+      p.unref();
+      try { fs.writeFileSync(path.join(app.getPath('userData'), 'ngrok.pid'), String(p.pid)); } catch {}
+      tunnel.proc = { pid: p.pid, detached: true }; tunnel.started = Date.now();
+      p.on('error', err => { tunnel.error = err.message; tunnelEmit(); });
+      tunnelWatch();
+      return;
     } else {
       const exe = await ensureCloudflared();
       tunnel.status = 'starting'; tunnelEmit();
@@ -406,7 +410,50 @@ async function tunnelStart() {
     setTimeout(() => { if (tunnel.proc === p && !tunnel.url && !tunnel.error) { tunnel.error = 'The link is taking long to start — check your internet connection.'; tunnelEmit(); } }, 30000);
   } catch (e) { tunnel.status = 'off'; tunnel.error = e.message; tunnelLog('start failed: ' + e.message); tunnelEmit(); }
 }
-function tunnelStop() { clearTimeout(tunnel.retryT); tunnel.retryT = null; tunnel.status = 'off'; tunnel.url = null; const p = tunnel.proc; tunnel.proc = null; if (p) p.kill(); tunnelEmit(); }
+function tunnelStop() { clearTimeout(tunnel.retryT); tunnel.retryT = null; clearInterval(tunnel.watchT); tunnel.status = 'off'; tunnel.url = null; const p = tunnel.proc; tunnel.proc = null; if (p && p.detached) ngrokKill(); else if (p) p.kill(); tunnelEmit(); }
+/* ngrok runs as its own process; MiniNet checks it through ngrok's local status page */
+const NGROK_API_PORT = 4041;
+function ngrokApi() {
+  return new Promise(res => {
+    const req = require('http').get({ host: '127.0.0.1', port: NGROK_API_PORT, path: '/api/tunnels', timeout: 3000 }, r => {
+      let b = ''; r.on('data', d => b += d); r.on('end', () => { try { const t = (JSON.parse(b).tunnels || []).find(x => /^https:/.test(x.public_url)); res({ url: t ? t.public_url.replace(/\/$/, '') : null, port: t ? String((t.config && t.config.addr || '').split(':').pop()) : null }); } catch { res({ url: null }); } });
+    });
+    req.on('error', () => res(null)); req.on('timeout', () => { req.destroy(); res(null); });
+  });
+}
+async function ngrokKill() {
+  let pid = null; try { pid = +fs.readFileSync(path.join(app.getPath('userData'), 'ngrok.pid'), 'utf8'); } catch {}
+  if (pid) { try { process.kill(pid); } catch {} }
+  if (process.platform === 'win32') await new Promise(r => execFile('taskkill', ['/F', '/IM', 'ngrok.exe'], () => r()));
+  await new Promise(r => setTimeout(r, 800));
+}
+function tunnelAdopt(url, how) {
+  tunnel.proc = tunnel.proc || { detached: true }; tunnel.url = url; tunnel.status = 'on'; tunnel.error = null; tunnel.tries = 0;
+  tunnelLog('online ' + url + (how ? ' (' + how + ')' : ''));
+  if (!cleanDomain(tunnelConf().domain)) tunnelConf({ domain: cleanDomain(url) });
+  tunnelEmit(); tunnelWatch();
+}
+function ngrokLogError() {
+  try { const lines = fs.readFileSync(path.join(app.getPath('userData'), 'ngrok.log'), 'utf8').trim().split('\n').slice(-30).reverse(); for (const l of lines) { try { const j = JSON.parse(l); if (j.lvl === 'eror' || j.lvl === 'crit') return String(j.err || j.msg).replace(/\s+/g, ' ').slice(0, 300); } catch {} } } catch {}
+  return null;
+}
+// health check every 10 s: notices when the link comes up, goes down or ngrok stops, and restarts it
+function tunnelWatch() {
+  clearInterval(tunnel.watchT); let misses = 0;
+  tunnel.watchT = setInterval(async () => {
+    if (!tunnelConf().on || tunnelConf().provider !== 'ngrok') return;
+    const a = await ngrokApi();
+    if (a && a.url) { misses = 0; if (tunnel.status !== 'on' || tunnel.url !== a.url) tunnelAdopt(a.url); return; }
+    const err = ngrokLogError(); if (err && err !== tunnel.error) { tunnel.error = err; tunnelEmit(); }
+    if (!a) misses++;
+    if (misses >= 3 || (tunnel.started && Date.now() - tunnel.started > 45000 && tunnel.status !== 'on' && !a)) {
+      clearInterval(tunnel.watchT); tunnelLog('link down — restarting' + (err ? ': ' + err : ''));
+      tunnel.proc = null; tunnel.status = 'off'; tunnel.url = null; tunnelEmit();
+      const n = (tunnel.tries = (tunnel.tries || 0) + 1); const wait = [5, 15, 30][n - 1] || 60;
+      tunnel.retryT = setTimeout(() => { tunnel.retryT = null; if (tunnelConf().on && !tunnel.proc) tunnelStart(); }, wait * 1000);
+    }
+  }, 10000);
+}
 ipcMain.handle('tunnel', async (e, op, opts = {}) => {
   if (op === 'start') { tunnelConf({ on: true }); tunnelStart(); }
   if (op === 'stop') { tunnelConf({ on: false }); tunnelStop(); }
@@ -420,7 +467,7 @@ ipcMain.handle('tunnel', async (e, op, opts = {}) => {
   }
   return tunnelState();
 });
-app.on('before-quit', () => { const p = tunnel.proc; tunnel.proc = null; if (p) p.kill(); });
+app.on('before-quit', () => { const p = tunnel.proc; if (p && !p.detached) { tunnel.proc = null; p.kill(); } });   // a detached ngrok link keeps running for the next start
 
 /* ---------------- IPC: missions ---------------- */
 ipcMain.handle('missions', (e, { op, id }) => {
@@ -550,6 +597,14 @@ async function accountsStatus() {
   return { sites: out, google };
 }
 ipcMain.handle('accounts', () => accountsStatus());
+ipcMain.handle('business', async (e, op, a = {}) => {
+  const biz = agent.biz;
+  if (op === 'data') return biz.panelData();
+  if (op === 'save') return biz.saveSettings(a);
+  if (op === 'confirm') return biz.confirmOwner(a.dealId);
+  if (op === 'test-alerts') { try { const r = await biz.gmailSearch(biz.settings().alertSenders.map(x => 'from:' + x.replace(/^@/, '')).join(' OR '), { open: 2 }); return { ok: true, found: r.rows.length, sample: r.opened.map(m => ({ from: m.from, trusted: biz.trustedSender(m.from), subject: m.subject, date: m.date, parsed: biz.parseAlert(m.subject + '\n' + m.body) })) }; } catch (err) { return { ok: false, error: err.message }; } }
+  return null;
+});
 // The owner presses "Use the token from the ngrok page": find it on their open ngrok dashboard tab
 ipcMain.handle('ngrok-token-from-page', async () => {
   for (const wc of webContents.getAllWebContents()) {
@@ -597,7 +652,10 @@ async function restoreSessionCookies() {
   } catch {}
 }
 let savedOnQuit = false;
-app.on('before-quit', e => { if (savedOnQuit) return; e.preventDefault(); savedOnQuit = true; saveSessionCookies().finally(() => app.quit()); });
+// on quit: save sign-in cookies AND flush site storage (WhatsApp keeps its login in IndexedDB) before closing
+async function saveEverything() { await saveSessionCookies().catch(() => {}); try { await session.fromPartition(PARTITION).flushStorageData(); } catch {} }
+app.on('before-quit', e => { if (savedOnQuit) return; e.preventDefault(); savedOnQuit = true; Promise.race([saveEverything(), new Promise(r => setTimeout(r, 8000))]).finally(() => app.quit()); });
+setInterval(() => { try { session.fromPartition(PARTITION).flushStorageData(); } catch {} }, 60000);   // also every minute, in case of a power cut
 setInterval(saveSessionCookies, 5 * 60 * 1000).unref?.();   // also every 5 minutes, in case the laptop switches off
 
 /* ---------------- start ---------------- */
@@ -612,7 +670,8 @@ app.whenReady().then(async () => {
     shell: shellReq,
     onEvent: ev => win && win.webContents.send('agent-event', ev),
     accounts: () => accountsStatus(),
-    popups: () => popupList()
+    popups: () => popupList(),
+    quit: () => { tunnelLog('closing for update/restart'); setTimeout(() => app.quit(), 200); }
   });
   if (tunnelConf().on) setTimeout(() => { tunnelLog('auto-start ' + tunnelConf().provider); tunnelStart(); }, 3000);   // reopen the connector link if it was on
 });

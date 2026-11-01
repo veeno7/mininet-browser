@@ -27,6 +27,7 @@ window.app.on('agent-event', ev => {
   }
   if (ev.type === 'server' && ev.error) toast(ev.error);
   if (ev.type === 'approvals' && panelOpen === 'agents') showPanel('agents');
+  if (ev.type === 'business' && panelOpen === 'business' && ev.what !== 'event') showPanel('business');
 });
 $('#aiStop').onclick = () => { window.app.agentPause(!aiPaused); if (!aiPaused) orbitAbort(); };
 
@@ -254,7 +255,7 @@ async function ollamaPick() {
   } catch {}
 }
 const LOCAL_BRAINS = new Set(['ollama', 'lmstudio']);
-const LITE_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'snapshot', 'read_text', 'click', 'type', 'press_key', 'scroll', 'ask_user', 'get_email_code']);
+const LITE_TOOLS = new Set(['open_tab', 'navigate', 'go_back', 'snapshot', 'read_text', 'click', 'type', 'press_key', 'scroll', 'ask_user', 'get_email_code', 'business_info', 'find_client', 'save_client', 'log_client', 'save_deal', 'verify_payment']);
 // Ask one brain (provider) for the next step
 async function callBrain(pk, cv, sysExtra = '', exclude = null) {
   const p = prov(pk), sys = (await systemPrompt(pk)) + (sysExtra ? '\n' + sysExtra : '');
@@ -567,6 +568,12 @@ async function renderAgents(body) {
       <small>A private, secure web link so cloud AIs (Claude.ai, ChatGPT, Gemini agents…) can use this browser as their eyes and hands. Approval cards still protect you.</small>
       <div id="tunBox"></div></div>
 
+    <div class="set"><b>🔑 One link per AI app</b>
+      <small>Give ChatGPT, Grok and others their <b>own</b> link, so each shows up by name and can be removed alone. Access: <b>Look only</b> · <b>Browser</b> (use websites) · <b>Business</b> (browser + clients, deals, payment checks) · <b>Full</b>.</small>
+      <div id="agLinks">${(c.links || []).map(l => `<div class="pi"><div class="tx"><div>${esc(l.name)} · <select class="inp" data-lvl="${l.id}" style="width:auto;display:inline;margin:0;padding:2px 4px">${['read', 'browser', 'business', 'full'].map(v => `<option value="${v}" ${l.level === v ? 'selected' : ''}>${({ read: 'Look only', browser: 'Browser', business: 'Business', full: 'Full' })[v]}</option>`).join('')}</select></div><small>${l.lastUsed ? 'last used ' + new Date(l.lastUsed).toLocaleString() : 'not used yet'}</small></div><button class="btn sm" data-lcopy="${l.id}">Copy link</button><button class="btn sm" data-ldel="${l.id}">Remove</button></div>`).join('') || '<small>No extra links yet.</small>'}</div>
+      <div style="display:flex;gap:6px;margin-top:6px"><input class="inp" id="agLName" placeholder="App name, e.g. ChatGPT or Grok" style="margin:0"><select class="inp" id="agLLevel" style="width:auto;margin:0"><option value="browser">Browser</option><option value="business">Business</option><option value="read">Look only</option><option value="full">Full</option></select><button class="btn sun sm" id="agLAdd">Add</button></div>
+      <small style="margin-top:6px"><b>ChatGPT</b> (Plus/Pro/Business, on the web): Settings → Security → turn on <b>Developer mode</b> → Plugins/Apps → <b>+</b> → paste the link, no sign-in. In a chat: + → Developer mode → pick MiniNet.<br><b>Grok</b> (paid plan): grok.com/connectors → New Connector → Custom → paste the link.<br><b>Claude.ai</b>: Customize → Connectors → Add custom connector → paste the link.</small></div>
+
     <div class="set"><b>💻 Local link — AIs on this computer (Ollama tools, LM Studio, scripts)</b>
       <small>Permanent while this browser is open. Any MCP app on this computer can use it directly; OpenAPI tools can use the second link.</small>
       <div class="codebox">http://127.0.0.1:${c.port}/t/••••••/mcp</div>
@@ -604,6 +611,10 @@ async function renderAgents(body) {
   $('#agShow').onclick = () => { $('#agTok').textContent = c.token; };
   $('#agNew').onclick = async () => { if (confirm('Make a new key? Apps using the old key will need the new one (Claude Desktop updates automatically).')) { await window.app.agentConfig({ regenerate: true }); showPanel('agents'); } };
   $('#agPort').onchange = async e => { await window.app.agentConfig({ port: +e.target.value }); setTimeout(() => showPanel('agents'), 300); };
+  $('#agLAdd').onclick = async () => { const name = $('#agLName').value.trim(); if (!name) return toast('Type the app name first'); await window.app.agentConfig({ addLink: { name, level: $('#agLLevel').value } }); showPanel('agents'); };
+  body.querySelectorAll('[data-ldel]').forEach(b => b.onclick = async () => { if (!confirm('Remove this link? That AI app will lose access at once.')) return; await window.app.agentConfig({ removeLink: b.dataset.ldel }); showPanel('agents'); });
+  body.querySelectorAll('[data-lvl]').forEach(sel => sel.onchange = async () => { await window.app.agentConfig({ linkLevel: { id: sel.dataset.lvl, level: sel.value } }); toast('Access changed'); });
+  body.querySelectorAll('[data-lcopy]').forEach(b => b.onclick = async () => { const l = (c.links || []).find(x => x.id === b.dataset.lcopy); const t = await window.app.tunnel('status'); if (t.status !== 'on' || !t.url) return toast('Turn on the connector link first'); window.app.copy(`${t.url}/t/${l.token}/mcp`); toast(l.name + ' link copied — keep it private'); });
   paintTunnel(await window.app.tunnel('status'), c.token);
   window.app.agentTools().then(t => { const el = $('#agTools'); if (el) el.textContent = t.map(x => x.name).join(' · '); });
   renderAgentLog();
@@ -774,6 +785,60 @@ window.app.on('page-dialog', d => {
 
 /* ================= Accounts: sign in once, stay signed in ================= */
 PANELS.accounts = { title: 'Accounts', render: renderAccounts };
+PANELS.business = { title: 'Business', render: renderBusiness, wide: true };
+async function renderBusiness(body) {
+  const d = await window.app.business('data'), s = d.settings, m = d.money;
+  const money = n => (+n || 0).toLocaleString() + ' ' + esc(s.currency);
+  const when = t => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const clientName = id => (d.clients.find(c => c.id === id) || {}).name || '?';
+  body.innerHTML = `
+    <div class="set"><b>This month</b><small>Income <b>${money(m.income)}</b> · Spent <b>${money(m.spent)}</b> · Budget left <b>${money(m.left)}</b> · Watcher: ${d.watcher === 'ok' ? '<span class="ok">● on</span>' : '<span class="bad">' + esc(d.watcher) + '</span>'}</small></div>
+    <div class="set"><b>Deals</b>${d.deals.length ? d.deals.slice(0, 30).map(x => `<div class="pi"><div class="tx"><div>${esc(x.title || 'Deal')} · ${esc(clientName(x.clientId))} · ${x.amount ? money(x.amount) : ''}</div><small>${esc(x.status)}${x.payment && x.payment.needsOwnerCheck ? ' · <span class="bad">big payment — check your bank app, then confirm</span>' : ''} · ${when(x.updated || x.created)}</small></div>${x.payment && x.payment.needsOwnerCheck ? `<button class="btn sun sm" data-conf="${x.id}">Confirm paid</button>` : ''}</div>`).join('') : '<small>No deals yet. AIs create them while talking to clients.</small>'}</div>
+    <div class="set"><b>Your business (AIs read this)</b>
+      <label>Business name<input class="inp" id="bzName" value="${esc(s.businessName)}"></label>
+      <label>What you sell and the prices<textarea class="inp" id="bzOffer" rows="4" placeholder="e.g. Logo design — 25,000; Short video edit — 15,000…">${esc(s.offer)}</textarea></label>
+      <label>Rules for talking to clients<textarea class="inp" id="bzRules" rows="3">${esc(s.rules)}</textarea></label>
+      <label>Lowest price an AI may agree to (% of list price)<input class="inp" id="bzMin" type="number" value="${s.minPricePercent}"></label>
+      <label>Currency<input class="inp" id="bzCur" value="${esc(s.currency)}"></label></div>
+    <div class="set"><b>Payment details to give clients</b><small>Only shared with a client after a deal is agreed. You type these — AIs can't change them.</small>
+      <label>Bank<input class="inp" id="bzBank" value="${esc(s.payment.bank)}" placeholder="e.g. OPay / Moniepoint"></label>
+      <label>Account name<input class="inp" id="bzAName" value="${esc(s.payment.accountName)}"></label>
+      <label>Account number<input class="inp" id="bzANum" value="${esc(s.payment.accountNumber)}"></label>
+      <label>Note for clients<input class="inp" id="bzANote" value="${esc(s.payment.note)}" placeholder="e.g. Send your name as the transfer narration"></label></div>
+    <div class="set"><b>Payment checking (Gmail bank alerts)</b><small>A payment only counts when a credit alert email from one of these senders shows the exact amount. Turn on email alerts in your bank app for the account above.</small>
+      <label>Trusted alert senders (one per line; @domain allows the whole domain)<textarea class="inp" id="bzSend" rows="3">${esc(s.alertSenders.join('\n'))}</textarea></label>
+      <label>Gmail account number (0 = first signed-in account)<input class="inp" id="bzGm" type="number" value="${s.gmailAccount}"></label>
+      <label>Also ask me to confirm payments of this amount or more<input class="inp" id="bzBig" type="number" value="${s.ownerConfirmAbove}"></label>
+      <button class="btn sm" id="bzTest">Test: read my latest alerts</button><div id="bzTestOut"></div></div>
+    <div class="set"><b>Budget for spending (ads, tools)</b><small>AIs only record spending inside these limits; anything above needs your OK. 0 = always ask.</small>
+      <label>Monthly budget<input class="inp" id="bzBud" type="number" value="${s.budget.monthly}"></label>
+      <label>Most for one expense<input class="inp" id="bzPer" type="number" value="${s.budget.perExpense}"></label></div>
+    <div class="set"><b>Watcher &amp; autopilot</b>
+      <label>Watch Gmail <input type="checkbox" class="tog" id="bzWG" ${s.watch.gmail ? 'checked' : ''}></label>
+      <label>Watch WhatsApp (keep a WhatsApp tab open) <input type="checkbox" class="tog" id="bzWW" ${s.watch.whatsapp ? 'checked' : ''}></label>
+      <label>Check every (seconds)<input class="inp" id="bzEvery" type="number" value="${s.watch.everySeconds}"></label>
+      <label><b>Autopilot</b> — wake an AI by itself when a client writes or a payment arrives <input type="checkbox" class="tog" id="bzAP" ${s.autopilot.on ? 'checked' : ''}></label>
+      <small>Uses the brain chosen in Orbit settings. It follows your playbook, asks you (ask_user) when unsure, and never pays anything.</small>
+      <label>Playbook<textarea class="inp" id="bzPlay" rows="4">${esc(s.autopilot.playbook)}</textarea></label>
+      <label>Most autopilot runs per hour<input class="inp" id="bzMax" type="number" value="${s.autopilot.maxRunsPerHour}"></label></div>
+    <button class="btn sun wide" id="bzSave">Save</button>
+    <div class="set"><b>Clients (${d.clients.length})</b>${d.clients.slice(0, 30).map(c => `<div class="pi"><div class="tx"><div>${esc(c.name || c.contact)}</div><small>${esc([c.platform, c.contact, c.preferences].filter(Boolean).join(' · ')).slice(0, 140)}</small></div></div>`).join('') || '<small>None yet.</small>'}</div>
+    <div class="set"><b>Money record</b>${d.ledger.slice(0, 20).map(e => `<div class="pi"><div class="tx"><div>${e.type === 'income' ? '⬇' : '⬆'} ${money(e.amount)} · ${esc(e.purpose || e.from || '')}</div><small>${when(e.t)} · ${esc(e.by || '')}${e.alert ? ' · alert from ' + esc(e.alert.sender) : ''}</small></div></div>`).join('') || '<small>Nothing yet.</small>'}</div>
+    <div class="set"><b>Recent events</b>${d.events.slice(0, 15).map(e => `<div class="pi"><div class="tx"><div>${({ whatsapp: '💬', email: '✉️', payment_alert: '💰' })[e.type] || '•'} ${esc(e.chat || e.subject || '')}</div><small>${when(e.t)} · ${esc((e.preview || '').slice(0, 90))}</small></div></div>`).join('') || '<small>Nothing yet.</small>'}</div>
+    <div class="set" style="border:0"><b>Audit log</b>${d.audit.slice(0, 30).map(a => `<div class="pi"><div class="tx"><div>${esc(a.who)} · ${esc(a.text)}</div><small>${when(a.t)} · ${esc(a.kind)}</small></div></div>`).join('')}</div>`;
+  const v = id => $('#' + id).value;
+  $('#bzSave').onclick = async () => {
+    await window.app.business('save', { businessName: v('bzName'), offer: v('bzOffer'), rules: v('bzRules'), minPricePercent: Math.max(1, Math.min(100, +v('bzMin') || 80)), currency: v('bzCur') || 'NGN',
+      payment: { bank: v('bzBank'), accountName: v('bzAName'), accountNumber: v('bzANum'), note: v('bzANote') },
+      alertSenders: v('bzSend'), gmailAccount: +v('bzGm') || 0, ownerConfirmAbove: +v('bzBig') || 0,
+      budget: { monthly: +v('bzBud') || 0, perExpense: +v('bzPer') || 0 },
+      watch: { gmail: $('#bzWG').checked, whatsapp: $('#bzWW').checked, everySeconds: Math.max(20, +v('bzEvery') || 60) },
+      autopilot: { on: $('#bzAP').checked, playbook: v('bzPlay'), maxRunsPerHour: Math.max(1, +v('bzMax') || 12) } });
+    toast('Business settings saved'); renderBusiness(body);
+  };
+  $('#bzTest').onclick = async () => { $('#bzTestOut').innerHTML = '<small>Reading Gmail…</small>'; const r = await window.app.business('test-alerts'); $('#bzTestOut').innerHTML = r.ok ? `<small>${r.found} alert email(s) from trusted senders.</small>` + r.sample.map(x => `<small>• ${esc(x.from)} ${x.trusted ? '✓' : '✗'} — ${esc(x.subject)} — amount: <b>${x.parsed.amount ?? '?'}</b>, ${x.parsed.isCredit ? 'credit' : 'not a credit'}, ${esc(x.parsed.date || x.date)}</small>`).join('') : `<small class="bad">${esc(r.error)}</small>`; };
+  body.querySelectorAll('[data-conf]').forEach(b => b.onclick = async () => { if (!confirm('Did you check your bank app and see this money arrive?')) return; await window.app.business('confirm', { dealId: b.dataset.conf }); toast('Payment confirmed'); renderBusiness(body); });
+}
 async function renderAccounts(body) {
   body.className = '';
   body.innerHTML = '<small style="padding:14px;display:block">Checking your sign-ins…</small>';
