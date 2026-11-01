@@ -34,6 +34,9 @@ app.whenReady().then(async () => {
     // Accounts panel
     await js(`hidePanel(); showPanel('accounts')`); await sleep(2500);
     ok('Accounts panel has add-Google button', await js(`!!document.querySelector('#acAddG')`));
+    ok('Accounts panel has Other Gmails (app password) form', await js(`!!document.querySelector('#acMAdd') && !!document.querySelector('#acMPass') && document.querySelector('#acMPass').type==='password'`));
+    await js(`document.querySelector('#acMEmail').value='x@gmail.com'; document.querySelector('#acMPass').value='short'; document.querySelector('#acMAdd').click(); 1`); await sleep(800);
+    ok('wrong app password gives a clear message', /16 letters/.test(await js(`document.querySelector('#acMMsg').innerText`)));
     await snap('accounts-panel');
     // AI control: add a per-AI link, it appears, level change, remove
     await js(`hidePanel(); showPanel('agents')`); await sleep(1200);
@@ -49,6 +52,7 @@ app.whenReady().then(async () => {
     const ev = JSON.parse((await agent.call('wait_for_events', { since_id: 0, timeout_seconds: 0 }, 'Tester')).content[0].text); ok('wait_for_events works', Array.isArray(ev.events));
     const tl = agent.toolList(); ok('tool list has business + codes + skills (' + tl.length + ' tools)', ['verify_payment', 'get_email_code', 'save_skill', 'find_client'].every(n => tl.some(t => t.name === n)));
     ok('get_email_code takes a gmail choice', !!tl.find(t => t.name === 'get_email_code').inputSchema.properties.gmail);
+    ok('read_email tool exists', !!tl.find(t => t.name === 'read_email'));
     ok('verify_payment takes a gmail choice', !!tl.find(t => t.name === 'verify_payment').inputSchema.properties.gmail);
   } catch (e) { console.log('ERROR', e.stack); fail++; }
   console.log(`\nUI: ${pass} passed, ${fail} failed`); agent.setConfig({ mode: 'ask' }); app.exit(fail ? 1 : 0);

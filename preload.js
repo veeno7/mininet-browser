@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('app', {
   readClipboard: () => ipcRenderer.invoke('clipboard-read'),
   business: (op, a) => ipcRenderer.invoke('business', op, a),
   codex: (op, a) => ipcRenderer.invoke('codex', op, a),
+  mail: (op, a) => ipcRenderer.invoke('mail', op, a),
   accountSignout: (id) => ipcRenderer.invoke('account-signout', id),
   agentRelease: (key) => ipcRenderer.invoke('agent-release', key),
   pageDialogAnswer: (id, value) => ipcRenderer.send('page-dialog-answer', { id, value }),

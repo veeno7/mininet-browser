@@ -512,6 +512,19 @@ function writeSecrets(s) {
 }
 ipcMain.handle('secret-set', (e, { key, value }) => { const s = readSecrets(true); if (value) s[key] = value; else delete s[key]; writeSecrets(s); return true; });
 ipcMain.handle('secret-has', (e, key) => !!readSecrets()[key]);
+/* other Gmails, read with Google app passwords (stored encrypted with the other secrets) */
+const mail = require('./mail');
+// app passwords live in their OWN encrypted file, so a problem with the main key store can never block them
+function mailKeysFile() { return path.join(app.getPath('userData'), 'mail-keys.bin'); }
+function readMailKeys() { try { const b = fs.readFileSync(mailKeysFile()); return JSON.parse(safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(b) : b.toString('utf8')); } catch { return {}; } }
+function writeMailKeys(o) { const j = JSON.stringify(o); fs.writeFileSync(mailKeysFile(), safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(j) : Buffer.from(j)); }
+function initMail() { mail.init({ userData: app.getPath('userData'), getPass: em => readMailKeys()[em] || null, setPass: (em, v) => { const s = readMailKeys(); if (v) s[em] = v; else delete s[em]; writeMailKeys(s); } }); }
+ipcMain.handle('mail', async (e, op, a = {}) => {
+  if (op === 'list') return mail.accounts();
+  if (op === 'add') { try { const r = await mail.add(a.email, a.pass); agent.biz.audit('owner', 'mail', 'Connected ' + r.email + ' with an app password'); return { ok: true, ...r }; } catch (err) { agent.biz.audit('owner', 'mail-error', 'Connecting ' + String(a.email || '') + ' failed: ' + err.message); return { ok: false, error: err.message }; } }
+  if (op === 'remove') return mail.remove(a.email);
+  return null;
+});
 
 // Orbit's requests to AI providers go from here (no browser CORS limits; keys never touch web pages)
 function localHttp(url, opts, limit) {
@@ -698,12 +711,14 @@ app.whenReady().then(async () => {
   ext.init(app.getPath('userData'));
   try { writeBridge(); } catch (err) { console.error('bridge', err); }
   createWindow();
+  initMail();
   agent.init({
     userData: app.getPath('userData'),
     shell: shellReq,
     onEvent: ev => win && win.webContents.send('agent-event', ev),
     accounts: () => accountsStatus(),
     popups: () => popupList(),
+    mail,
     quit: () => { tunnelLog('closing for update/restart'); setTimeout(() => app.quit(), 200); }
   });
   if (tunnelConf().on) setTimeout(() => { tunnelLog('auto-start ' + tunnelConf().provider); tunnelStart(); }, 3000);   // reopen the connector link if it was on

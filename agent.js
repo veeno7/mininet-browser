@@ -732,7 +732,7 @@ function deleteMission(id) {
 Object.assign(TOOLS, {
   list_accounts: {
     description: 'See which sites the owner is already signed in to in this browser (Google, YouTube, CapCut, GitHub, Instagram, Facebook, TikTok, X, LinkedIn, WhatsApp) and ALL the Google accounts signed in here, each with its number. On sites with "Continue with Google", pick the Google account the owner wants instead of typing a password.',
-    schema: {}, run: async () => { if (!accountsFn) throw new Error('Not available'); const a = await accountsFn(); return text({ signed_in: a.sites.filter(s => s.signedIn).map(s => s.name), not_signed_in: a.sites.filter(s => !s.signedIn).map(s => s.name), google_accounts: a.google.map(g => ({ email: g.email, name: g.name, number: g.index })), how_to_use_a_google_account: 'Gmail: https://mail.google.com/mail/u/<number>/ . Other Google sites (YouTube, Drive, Flow…): add ?authuser=<email>. On a "Choose an account" screen click the account you want. To add another account, open https://accounts.google.com/AddSession and let the owner type the password (ask_user).' }); }
+    schema: {}, run: async () => { if (!accountsFn) throw new Error('Not available'); const a = await accountsFn(); return text({ signed_in: a.sites.filter(s => s.signedIn).map(s => s.name), not_signed_in: a.sites.filter(s => !s.signedIn).map(s => s.name), google_accounts: a.google.map(g => ({ email: g.email, name: g.name, number: g.index })), other_gmails_read_by_app_password: mailMod ? mailMod.accounts().map(x => x.email) : [], how_to_use_a_google_account: 'Gmail: https://mail.google.com/mail/u/<number>/ . Other Google sites (YouTube, Drive, Flow…): add ?authuser=<email>. On a "Choose an account" screen click the account you want. To add another account, open https://accounts.google.com/AddSession and let the owner type the password (ask_user).' }); }
   },
   answer_dialog: {
     description: 'Choose how the NEXT pop-up (alert / confirm "Are you sure?" / prompt asking for text) in a tab is answered. Without this, pop-ups in a tab you are working in are answered OK (prompts get their default text) and the result tells you what was shown.',
@@ -793,7 +793,12 @@ Object.assign(TOOLS, {
       const until = Date.now() + 60000;
       let seen = 0;
       while (true) {
-        const feed = await gmailFeed(a.gmail);
+        let feed = await gmailFeed(a.gmail && googleListHas(await googleAccounts(), a.gmail) ? a.gmail : (a.gmail ? '__none__' : undefined)).catch(() => []);
+        if (mailMod && mailMod.accounts().length) {
+          const only = a.gmail ? [String(a.gmail).toLowerCase()] : null;
+          const im = await mailMod.searchAll('newer_than:1d', { limit: 6 }, only).catch(() => []);
+          feed = feed.concat(im.filter(m => !m.error).map(m => ({ account: m.account, title: m.subject, summary: m.body.slice(0, 600), from: (m.name || '') + ' <' + m.from + '>', time: m.time })));
+        }
         if (!feed.length && !seen) { /* maybe signed out or empty */ }
         seen = feed.length;
         const fresh = feed.filter(e => Date.now() - e.time < 15 * 60000 && words.some(w => (e.from + ' ' + e.title).toLowerCase().includes(w))).sort((x, y) => y.time - x.time);
@@ -1192,23 +1197,26 @@ function stop() { if (server) { server.close(); server = null; } }
 function restart() { stop(); start(); }
 
 let accountsFn = null, popupsFn = () => [];
-let quitFn = null;
+let quitFn = null, mailMod = null;
 // "which Gmail": an email, a number, or nothing (= every signed-in account)
 async function googleAccounts() { try { return accountsFn ? (await accountsFn()).google : []; } catch { return []; } }
+function googleListHas(list, which) { return /^\d+$/.test(String(which)) || list.some(x => x.email.toLowerCase() === String(which).toLowerCase().trim()); }
 async function googleIndexes(which) {
+  if (which === '__none__') return [];
   const list = await googleAccounts();
   if (which == null || which === '' || which === 'all') return list.length ? list.map(g => g.index) : [0];
   if (/^\d+$/.test(String(which))) return [+which];
   const g = list.find(x => x.email.toLowerCase() === String(which).toLowerCase().trim());
-  if (!g) throw new Error(`The Google account ${which} is not signed in to MiniNet. Signed in: ${list.map(x => x.email).join(', ') || 'none'}. To add it, open https://accounts.google.com/AddSession and ask the owner to sign in.`);
+  if (!g && mailMod && mailMod.accounts().some(x => x.email === String(which).toLowerCase().trim())) return [];
+  if (!g) throw new Error(`The Google account ${which} is not signed in to MiniNet. Signed in: ${list.map(x => x.email).join(', ') || 'none'}. To read it, the owner can connect it in MiniNet → Accounts → Other Gmails with a Google app password.`);
   return [g.index];
 }
-function init({ userData, shell, onEvent, accounts, popups, quit }) {
-  quitFn = quit || null;
+function init({ userData, shell, onEvent, accounts, popups, quit, mail }) {
+  quitFn = quit || null; mailMod = mail || null;
   shellReq = shell; notify = onEvent || notify; accountsFn = accounts || null; if (popups) popupsFn = popups;
   loadConfig(userData);
   missionInit(userData);
-  biz.init({ userData, shellReq: (op, a) => shellReq(op, a, 30000), notify: e => notify(e), googleIndexes, googleAccounts });
+  biz.init({ userData, shellReq: (op, a) => shellReq(op, a, 30000), notify: e => notify(e), googleIndexes, googleAccounts, mail: mailMod });
   start();
 }
 

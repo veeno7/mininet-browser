@@ -1,8 +1,8 @@
 {
   "name": "mininet-browser",
   "productName": "MiniNet Browser",
-  "version": "1.12.1",
-  "description": "MiniNet Browser \u2014 the browser any AI can use as its eyes and hands.",
+  "version": "1.13.1",
+  "description": "MiniNet Browser — the browser any AI can use as its eyes and hands.",
   "main": "main.js",
   "author": "Seyi",
   "license": "MIT",
@@ -11,12 +11,16 @@
     "build": "electron-packager . MiniNetBrowser --platform=win32 --arch=x64 --icon=icon.ico --out=dist --overwrite --asar --ignore=^/dist --ignore=^/docs --ignore=^/\\.github --ignore=^/test --ignore=^/\\.ezip --ignore=^/test[0-9a-z-]*\\.js --ignore=^/shots\\.js"
   },
   "devDependencies": {
-    "electron": "38.8.6",
-    "@electron/packager": "18.4.4"
+    "@electron/packager": "18.4.4",
+    "electron": "38.8.6"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/veeno7/mininet-browser.git"
   },
-  "homepage": "https://veeno7.github.io/mininet-browser/"
+  "homepage": "https://veeno7.github.io/mininet-browser/",
+  "dependencies": {
+    "imapflow": "^1.7.8",
+    "mailparser": "^3.14.1"
+  }
 }

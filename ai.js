@@ -849,12 +849,24 @@ async function renderAccounts(body) {
       <small>Sign in to as many Gmail accounts as you like — they all stay signed in, and AIs can use any of them (codes, payment alerts, YouTube, Drive…). You type the password; AIs never do.</small>
       ${a.google.length ? a.google.map(g => `<div class="pi"><img src="https://www.google.com/s2/favicons?sz=64&domain=google.com"><div class="tx"><div>${esc(g.email)}</div><small>${esc(g.name || '')} · account ${g.index}</small></div><button class="btn sm" data-open="https://mail.google.com/mail/u/${g.index}/">Gmail</button></div>`).join('') : '<small>No Google account yet.</small>'}
       <button class="btn sun wide" id="acAddG" style="margin-top:8px">${a.google.length ? '+ Add another Google account' : 'Sign in with Google'}</button></div>
+    <div class="set"><b>📬 Other Gmails (read by your AIs)</b>
+      <small>Google blocks password sign-in inside MiniNet, so connect other Gmails with a Google <b>app password</b>: in Chrome open <a href="#" id="acAppPw">myaccount.google.com/apppasswords</a> while signed in to that Gmail, create one named "MiniNet", and paste the 16 letters here. AIs can then read that inbox for sign-in codes, bank alerts and client emails (read-only). Remove it any time.</small>
+      <div id="acMail"><small>Loading…</small></div>
+      <input class="inp" id="acMEmail" placeholder="the Gmail address, e.g. you@gmail.com" autocomplete="off">
+      <input class="inp" id="acMPass" type="password" placeholder="16-letter app password" autocomplete="new-password">
+      <button class="btn sun wide" id="acMAdd">Connect this Gmail</button><small id="acMMsg"></small></div>
     <div class="set"><b>Sites</b>
       ${a.sites.filter(s => s.id !== 'google').map(s => `<div class="pi"><img src="https://www.google.com/s2/favicons?sz=64&domain=${esc(new URL(s.url).hostname)}"><div class="tx"><div>${esc(s.name)}</div><small>${s.signedIn ? '<span class="ok">● signed in</span>' : 'not signed in'}</small></div>
         ${s.signedIn ? `<button class="btn sm" data-open="${esc(s.url)}">Open</button>${s.id !== 'whatsapp' ? ` <button class="btn sm" data-out="${esc(s.id)}" title="Sign out of ${esc(s.name)} in this browser">Sign out</button>` : ''}` : `<button class="btn sun sm" data-open="${esc(s.login)}">Sign in</button>`}</div>`).join('')}
       <button class="btn wide" id="acRe" style="margin-top:8px">Refresh</button></div>`;
   $('#acAddG').onclick = () => newTab(a.google.length ? 'https://accounts.google.com/AddSession?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F' : 'https://accounts.google.com/ServiceLogin');
   $('#acRe').onclick = () => renderAccounts(body);
+  const paintMail = async () => { const list = await window.app.mail('list'); $('#acMail').innerHTML = list.length ? list.map(m => `<div class="pi"><img src="https://www.google.com/s2/favicons?sz=64&domain=mail.google.com"><div class="tx"><div>${esc(m.email)}</div><small><span class="ok">● connected</span> · since ${new Date(m.added).toLocaleDateString()}</small></div><button class="btn sm" data-mdel="${esc(m.email)}">Remove</button></div>`).join('') : '<small>None connected yet.</small>';
+    body.querySelectorAll('[data-mdel]').forEach(b => b.onclick = async () => { if (!confirm('Stop AIs reading ' + b.dataset.mdel + '?')) return; await window.app.mail('remove', { email: b.dataset.mdel }); toast('Removed'); paintMail(); }); };
+  paintMail();
+  $('#acAppPw').onclick = e => { e.preventDefault(); newTab('https://myaccount.google.com/apppasswords'); };
+  $('#acMAdd').onclick = async () => { const email = $('#acMEmail').value.trim(), pass = $('#acMPass').value; if (!email || !pass) return toast('Type the Gmail and its app password'); $('#acMMsg').textContent = 'Checking with Google…'; const r = await window.app.mail('add', { email, pass }); $('#acMPass').value = '';
+    if (r.ok) { $('#acMMsg').innerHTML = `<span class="ok">✓ Connected ${esc(r.email)} — ${r.inbox ?? '?'} emails, ${r.unread ?? '?'} unread.</span>`; $('#acMEmail').value = ''; paintMail(); } else $('#acMMsg').innerHTML = `<span class="bad">${esc(r.error)}</span>`; };
   body.querySelectorAll('[data-open]').forEach(b => b.onclick = () => newTab(b.dataset.open));
   body.querySelectorAll('[data-out]').forEach(b => b.onclick = async () => { if (!confirm('Sign out of this site in MiniNet Browser?')) return; await window.app.accountSignout(b.dataset.out); toast('Signed out'); renderAccounts(body); });
 }
