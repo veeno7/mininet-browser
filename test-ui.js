@@ -25,6 +25,24 @@ app.whenReady().then(async () => {
     ok('chat kept after reopening panel', /You asked: second/.test(await js(`document.querySelector('#cxLog').innerText`)));
     await js(`document.querySelector('#cxNew').click(); 1`); await sleep(500);
     ok('New chat clears it', !/You asked/.test(await js(`document.querySelector('#cxLog').innerText`)));
+    ok('toolbar mic (speak into page) present', await js(`!!document.querySelector('#bMic') && typeof dictateIntoPage === 'function'`));
+    // stand-alone Codex window (the desktop icon opens this)
+    await js(`window.app.codex('open-window')`); await sleep(2500);
+    const cw = BrowserWindow.getAllWindows().find(x => /codex\.html/.test(x.webContents.getURL()));
+    ok('Codex app window opens', !!cw);
+    if (cw) {
+      const cjs = c => cw.webContents.executeJavaScript(c);
+      ok('Codex window has model picker, mic and limit fallback', await cjs(`!!document.querySelector('#model') && !!document.querySelector('#mic') && !!document.querySelector('#fb') && document.querySelector('#model').value === 'gpt-6-luna'`));
+      await cjs(`document.querySelector('#new').click(); 1`); await sleep(400);
+      await cjs(`document.querySelector('#in').value='from the app'; document.querySelector('#send').click(); 1`); await sleep(2500);
+      ok('Codex window chat round trip', /You asked: from the app/.test(await cjs(`document.querySelector('#log').innerText`)));
+      await cjs(`document.querySelector('#in').value='LIMIT please'; document.querySelector('#send').click(); 1`); await sleep(4000);
+      const lt = await cjs(`document.querySelector('#log').innerText`);
+      ok('limit is recognised and handed to Orbit', /usage limit/.test(lt) && /Handing this job to MiniNet/.test(lt));
+      ok('fallback gives a clear result or reason', /\(Orbit\)|Could not hand the job|Helpers use the AI brains/.test(lt));
+      await snap('codex-app-main'); fs.writeFileSync(D + 'codex-app.png', (await cw.capturePage()).toPNG());
+      cw.close(); await sleep(300);
+    }
     // Business panel save + read back through the AI tool
     await js(`hidePanel(); showPanel('business')`); await sleep(1000);
     await js(`document.querySelector('#bzName').value='Seyi Studio'; document.querySelector('#bzOffer').value='Video edit 20,000'; document.querySelector('#bzGm').value='all'; document.querySelector('#bzSave').click(); 1`); await sleep(1200);

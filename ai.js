@@ -470,7 +470,8 @@ function renderOrbitSettings(body) {
     <div class="set"><b>🧠 Backup brains</b><small>If the main AI runs out of free quota, goes offline or fails, Orbit and its helpers switch to the next one automatically and carry on. Tick the ones you have set up (pick each in the list above once to add its key).</small>
       <div id="osBk">${Object.entries(PROVIDERS).filter(([k]) => k !== orbit.provider && k !== 'custom' || (k === 'custom' && orbit.urls.custom)).map(([k, v]) => `<label style="display:flex;gap:8px;align-items:center;justify-content:flex-start;text-align:left;margin:4px 0"><input type="checkbox" data-bk="${k}" ${(orbit.backups || []).includes(k) ? 'checked' : ''}> <span style="flex:1">${esc(v.name)}</span> <small style="margin:0;color:var(--dim)">${esc(modelName(k) || '')}</small></label>`).join('')}</div></div>
     <div class="set"><b>Voice input</b><small>Talking to Orbit needs a Groq, OpenAI or Gemini key.</small>
-      <select class="inp" id="osVoice"><option value="auto">Automatic</option><option value="groq" ${orbit.voice === 'groq' ? 'selected' : ''}>Groq Whisper (key from Groq)</option><option value="openai" ${orbit.voice === 'openai' ? 'selected' : ''}>OpenAI Whisper (key from OpenAI)</option><option value="gemini" ${orbit.voice === 'gemini' ? 'selected' : ''}>Gemini (key from Google)</option></select></div>
+      <select class="inp" id="osVoice"><option value="local" ${!orbit.voice || orbit.voice === 'auto' || orbit.voice === 'local' ? 'selected' : ''}>Free — runs on this computer, no key (recommended)</option><option value="groq" ${orbit.voice === 'groq' ? 'selected' : ''}>Groq Whisper (key from Groq)</option><option value="openai" ${orbit.voice === 'openai' ? 'selected' : ''}>OpenAI Whisper (key from OpenAI)</option><option value="gemini" ${orbit.voice === 'gemini' ? 'selected' : ''}>Gemini (key from Google)</option></select>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" id="osVoiceTr" ${orbit.voiceTranslate ? 'checked' : ''}> Translate what I say into English (speak Yoruba, French, Pidgin…)</label><small id="voiceProg"></small></div>
     <div class="set"><b>Custom instructions</b><small>Anything Orbit should always know or do.</small>
       <textarea class="inp" id="osInst" style="font:inherit;min-height:80px">${esc(orbit.instructions)}</textarea></div>
     <button class="btn sun wide" id="osSave">Save</button>
@@ -480,7 +481,7 @@ function renderOrbitSettings(body) {
   $('#osSave').onclick = async () => {
     orbit.models[orbit.provider] = $('#osModel').value.trim();
     if ($('#osUrl')) orbit.urls[orbit.provider] = $('#osUrl').value.trim();
-    orbit.voice = $('#osVoice').value; orbit.instructions = $('#osInst').value.trim();
+    orbit.voice = $('#osVoice').value; orbit.voiceTranslate = !!($('#osVoiceTr') && $('#osVoiceTr').checked); orbit.instructions = $('#osInst').value.trim();
     orbit.backups = [...body.querySelectorAll('[data-bk]')].filter(x => x.checked).map(x => x.dataset.bk);
     const k = $('#osKey') && $('#osKey').value.trim();
     if (k) await window.app.secretSet('key.' + orbit.provider, k);
@@ -489,14 +490,20 @@ function renderOrbitSettings(body) {
   $('#osBack').onclick = () => renderOrbit(body);
 }
 
-/* voice input */
+/* voice input — free Whisper on this computer by default; Groq / OpenAI / Gemini keys are optional */
 let rec = null, chunks = [];
-async function toggleMic() {
-  const btn = $('#oMic');
+async function voiceEngine() {
+  if (orbit.voice === 'local' || orbit.voice === 'auto' || !orbit.voice) return 'local';
+  return orbit.voice;
+}
+// record until the button is pressed again, then turn speech into text and hand it to onText
+async function recordVoice(btn, onText) {
   if (rec && rec.state === 'recording') { rec.stop(); return; }
-  let which = orbit.voice;
-  if (which === 'auto') which = ['groq', 'openai', 'gemini'].includes(orbit.provider) ? orbit.provider : (await window.app.secretHas('key.groq')) ? 'groq' : (await window.app.secretHas('key.openai')) ? 'openai' : (await window.app.secretHas('key.gemini')) ? 'gemini' : null;
-  if (!which) { toast('Voice needs a Groq, OpenAI or Gemini key — add one in Orbit settings'); return; }
+  const which = await voiceEngine();
+  if (which === 'local') {
+    const st = await window.app.voice('status');
+    if (!st.installed) { toast(st.installing ? 'Voice is still downloading…' : 'Setting up free voice (one time, about 150 MB)…'); if (!st.installing) window.app.voice('install').then(r => toast(r && r.ok ? 'Free voice is ready — press the mic and speak' : 'Voice setup failed: ' + ((r && r.error) || ''))); return; }
+  } else if (!(await window.app.secretHas('key.' + which))) { toast('Voice is set to ' + which + ' but no key is saved — switch Voice to "Free" in Orbit settings'); return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     rec = new MediaRecorder(stream); chunks = [];
@@ -504,19 +511,27 @@ async function toggleMic() {
     rec.onstop = async () => {
       stream.getTracks().forEach(t => t.stop()); btn && btn.classList.remove('rec');
       const blob = new Blob(chunks, { type: 'audio/webm' });
-      toast('Listening done — transcribing…');
+      toast(orbit.voiceTranslate ? 'Got it — transcribing and translating to English…' : 'Got it — writing down what you said…');
       let r;
-      if (which === 'gemini') r = await geminiTranscribe(blob);
-      else {
-        const cfg = which === 'groq' ? { url: 'https://api.groq.com/openai/v1/audio/transcriptions', model: 'whisper-large-v3-turbo' } : { url: 'https://api.openai.com/v1/audio/transcriptions', model: 'whisper-1' };
-        r = await window.app.transcribe({ ...cfg, keyName: 'key.' + which, audio: new Uint8Array(await blob.arrayBuffer()), mime: 'audio/webm' });
-      }
-      if (!r.ok) return toast('Voice: ' + r.error);
-      if (r.text.trim()) sendOrbit(r.text.trim());
+      try {
+        if (which === 'local') r = await window.app.voice('transcribe', { wav: new Uint8Array(await toWavBytes(blob)), translate: !!orbit.voiceTranslate });
+        else if (which === 'gemini') r = await geminiTranscribe(blob);
+        else {
+          const cfg = which === 'groq' ? { url: 'https://api.groq.com/openai/v1/audio/transcriptions', model: 'whisper-large-v3-turbo' } : { url: 'https://api.openai.com/v1/audio/transcriptions', model: 'whisper-1' };
+          r = await window.app.transcribe({ ...cfg, keyName: 'key.' + which, audio: new Uint8Array(await blob.arrayBuffer()), mime: 'audio/webm' });
+        }
+      } catch (e) { r = { ok: false, error: e.message }; }
+      if (!r || !r.ok) return toast('Voice: ' + ((r && r.error) || 'failed'));
+      const t = (r.text || '').trim();
+      if (!t || /^\(?(blank_audio|silence|music)\)?$/i.test(t)) return toast('I did not hear anything — try again a bit closer to the mic');
+      onText(t);
     };
-    rec.start(); btn && btn.classList.add('rec'); toast('Listening… press the mic again to send');
+    rec.start(); btn && btn.classList.add('rec'); toast('Listening… press the mic again when you finish');
   } catch (e) { toast('Microphone not available: ' + e.message); }
 }
+async function toggleMic() { return recordVoice($('#oMic'), t => sendOrbit(t)); }
+window.app.on('voice-progress', p => { if (p.label === 'ready') return; const el = document.getElementById('voiceProg'); if (el) el.textContent = p.label + ' ' + p.pct + '%'; else if (p.pct % 25 === 0) toast(p.label + ' downloading… ' + p.pct + '%'); });
+async function toWavBytes(blob) { const b64 = await toWavBase64(blob); const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; }
 // Gemini listens to audio directly: convert the recording to 16 kHz mono WAV and ask it for a transcript
 async function toWavBase64(blob) {
   const ctx = new AudioContext();
@@ -909,7 +924,7 @@ window.app.on('codex-event', ev => {
   codexSave(); if (panelOpen === 'codex') codexPaint();
 });
 async function renderCodex(body) {
-  const st = await window.app.codex('status'); codexBusy = st.running;
+  const st = await window.app.codex('status'); codexBusy = st.running; codexLog = load('codexChat', codexLog);
   body.innerHTML = `<style>
     #cxLog{height:calc(100vh - 250px);overflow:auto;padding:4px 2px;display:flex;flex-direction:column;gap:6px}
     .cx{padding:8px 10px;border-radius:10px;font-size:13px;line-height:1.45;max-width:92%;white-space:normal;word-wrap:break-word}
@@ -921,15 +936,32 @@ async function renderCodex(body) {
     <div class="set" style="padding-bottom:6px"><small>Chat with <b>OpenAI Codex</b> on this laptop. It works mainly in this browser (through MiniNet's tools) and can also use files in <code>${esc(st.dir)}</code>. ${st.exe ? '' : '<span class="bad">Codex CLI not found — install Codex and sign in.</span>'} It asks you (Allow cards) before acting, like other AIs.</small></div>
     <div id="cxLog"></div>
     <div style="display:flex;gap:6px;margin-top:8px"><textarea class="inp" id="cxIn" rows="2" placeholder="Tell Codex what to do…" style="margin:0;flex:1"></textarea>
-      <div style="display:flex;flex-direction:column;gap:4px"><button class="btn sun" id="cxSend">Send</button><button class="btn sm" id="cxNew" title="Start a new conversation">New chat</button></div></div>`;
+      <div style="display:flex;flex-direction:column;gap:4px"><button class="btn sun" id="cxSend">Send</button><button class="btn sm mic" id="cxMic" title="Speak (free, on this computer)">🎤 Speak</button><button class="btn sm" id="cxNew" title="Start a new conversation">New chat</button><button class="btn sm" id="cxApp" title="Open Codex in its own window (also on your desktop as MiniNet Codex)">↗ App</button></div></div>`;
   codexPaint();
   const send = async () => {
     if (codexBusy) { await window.app.codex('stop'); return; }
     const t = $('#cxIn').value.trim(); if (!t) return;
     $('#cxIn').value = ''; codexLog.push({ who: 'me', text: t }); codexBusy = true; codexSave(); codexPaint();
-    try { await window.app.codex('send', { text: t }); } catch (e) { codexBusy = false; codexLog.push({ who: 'err', text: e.message }); codexSave(); codexPaint(); }
+    const pf = load('codexPrefs', { model: 'gpt-6-luna', effort: 'medium' });
+    try { await window.app.codex('send', { text: t, model: pf.model, effort: pf.effort }); } catch (e) { codexBusy = false; codexLog.push({ who: 'err', text: e.message }); codexSave(); codexPaint(); }
   };
   $('#cxSend').onclick = send;
+  $('#cxMic').onclick = () => recordVoice($('#cxMic'), t => { $('#cxIn').value = t; send(); });
   $('#cxIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
+  $('#cxApp').onclick = () => window.app.codex('open-window');
   $('#cxNew').onclick = async () => { if (codexBusy) return toast('Wait for Codex to finish, or press Stop'); await window.app.codex('new'); codexLog = []; codexSave(); codexPaint(); toast('New Codex chat'); };
 }
+
+/* ================= speak into any web page ================= */
+// toolbar mic: free voice → the text is typed into whatever box has the cursor in the current page
+function dictateIntoPage() {
+  const btn = document.getElementById('bMic');
+  recordVoice(btn, t => {
+    const tab = typeof active !== 'undefined' && active;
+    if (!tab || !tab.wv) { window.app.copy(t); return toast('Copied what you said: ' + t.slice(0, 60)); }
+    tab.wv.focus(); tab.wv.insertText(t + ' ');
+    toast('Typed: ' + t.slice(0, 80));
+  });
+}
+document.getElementById('bMic') && (document.getElementById('bMic').onclick = dictateIntoPage);
+window.addEventListener('keydown', e => { if (e.ctrlKey && e.shiftKey && e.code === 'Space') { e.preventDefault(); dictateIntoPage(); } });

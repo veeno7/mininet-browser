@@ -192,7 +192,7 @@ body.htmlfull #main{height:100%}
 .orow .grow{flex:1}
 .chip{border:1px solid var(--line);background:var(--bg0);color:var(--mute);border-radius:20px;padding:4px 10px;font-size:12px;cursor:default;white-space:nowrap}
 .chip:hover{color:var(--ink);border-color:var(--teal)}
-.mic.rec{background:var(--sun1);color:#fff;animation:pl 1.2s infinite}
+.mic.rec,#bMic.rec{background:var(--sun1);color:#fff;animation:pl 1.2s infinite}
 .oHello{text-align:center;color:var(--mute);padding:26px 10px 6px}
 .oHello img{width:54px}
 .oHello b{display:block;color:var(--ink);font-size:16px;margin:6px 0 2px}

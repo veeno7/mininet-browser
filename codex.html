@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>MiniNet Codex</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: mediastream:">
+<style>
+:root{--bg:#120d33;--card:#1d1748;--line:#2e2668;--txt:#ece9ff;--dim:#a39dd0;--sun:linear-gradient(90deg,#ff6a88,#ffb347);--ok:#5eead4;--bad:#fca5a5}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+body{display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);-webkit-app-region:drag}
+header b{font-size:15px;white-space:nowrap}header label{white-space:nowrap;font-size:12.5px;color:var(--dim)}header .sp{flex:1}
+header select,header button,header label{-webkit-app-region:no-drag}
+select,textarea,button{font:inherit;color:var(--txt);background:var(--card);border:1px solid var(--line);border-radius:8px}
+select{padding:4px 6px}button{padding:6px 12px;cursor:pointer}button.sun{background:var(--sun);color:#1a0f2e;border:0;font-weight:600}
+button.ic{padding:6px 9px}button.rec{background:#b91c1c;border-color:#b91c1c}
+#log{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
+.m{max-width:85%;padding:9px 12px;border-radius:12px;white-space:pre-wrap;word-wrap:break-word}
+.me{align-self:flex-end;background:var(--sun);color:#1a0f2e}.ai{align-self:flex-start;background:var(--card)}
+.act{align-self:flex-start;font:12px ui-monospace,Consolas,monospace;color:var(--dim);padding:0 4px}
+.think{align-self:flex-start;color:var(--dim);font-style:italic;font-size:12.5px}
+.err{align-self:flex-start;background:#4c1d1d;color:var(--bad)}.note{align-self:center;color:var(--dim);font-size:12.5px;text-align:center;max-width:90%}
+footer{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);align-items:flex-end}
+textarea{flex:1;resize:none;padding:8px 10px;min-height:44px;max-height:160px}
+.col{display:flex;flex-direction:column;gap:6px}
+small{color:var(--dim)}
+.winbtn{background:none;border:0;color:var(--dim);font-size:16px;padding:2px 8px}
+</style></head>
+<body>
+<header>
+  <b>MiniNet Codex</b><small id="st">ready</small><span class="sp"></span>
+  <select id="model" title="Which Codex model">
+    <option value="gpt-6-luna">GPT-6-Luna — fast (recommended)</option>
+    <option value="gpt-5.6-terra">GPT-5.6-Terra — careful, slower</option>
+    <option value="gpt-5.6-luna">GPT-5.6-Luna — older, fast</option>
+  </select>
+  <select id="effort" title="How hard Codex thinks">
+    <option value="low">Quick</option><option value="medium" selected>Normal</option><option value="high">Think hard</option>
+  </select>
+  <label title="When Codex reaches its usage limit, MiniNet's own AI (Orbit) carries on with the job"><input type="checkbox" id="fb" checked> Keep going at limit</label>
+  <button class="winbtn" id="min" title="Minimise">–</button><button class="winbtn" id="close" title="Close">✕</button>
+</header>
+<div id="log"></div>
+<footer>
+  <textarea id="in" placeholder="Tell Codex what to do… (Enter = send, Shift+Enter = new line)"></textarea>
+  <div class="col"><button class="ic" id="mic" title="Speak — free voice on this computer, no key">🎤</button><button class="sun" id="send">Send</button></div>
+  <div class="col"><button id="new" title="Start a new conversation">New chat</button><button id="browser" title="Show MiniNet Browser">Browser</button></div>
+</footer>
+<script src="codex-window.js"></script>
+</body></html>

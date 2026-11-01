@@ -1,6 +1,7 @@
 // MiniNet Browser — main process
 const { app, BrowserWindow, session, ipcMain, Menu, shell, clipboard, dialog, safeStorage, webContents } = require('electron');
 const path = require('path');
+const os = require('os');
 const fs = require('fs');
 const agent = require('./agent');
 const ext = require('./extensions');
@@ -24,6 +25,7 @@ function isAd(url) {
 
 if (!app.requestSingleInstanceLock()) { app.quit(); }
 app.on('second-instance', (e, argv) => {
+  if (argv.includes('--codex')) { openCodexWindow(); return; }   // the "MiniNet Codex" desktop icon
   if (!win) return;
   if (win.isMinimized()) win.restore();
   win.focus();
@@ -90,9 +92,12 @@ function setupSession() {
   });
 }
 
+// windows must fit the screen (laptops with display scaling have a small work area, e.g. 1536×824)
+function fitSize(w, h) { const wa = require('electron').screen.getPrimaryDisplay().workAreaSize; return { width: Math.min(w, wa.width - 20), height: Math.min(h, wa.height - 20) }; }
 function createWindow() {
+  const sz = fitSize(1300, 840);
   win = new BrowserWindow({
-    width: 1300, height: 840, minWidth: 460, minHeight: 420,
+    width: sz.width, height: sz.height, center: true, minWidth: 460, minHeight: 420,
     backgroundColor: '#120d33', title: 'MiniNet Browser',
     icon: path.join(__dirname, 'icon.ico'),
     frame: false,
@@ -611,6 +616,55 @@ async function accountsStatus() {
   return { sites: out, google };
 }
 ipcMain.handle('accounts', () => accountsStatus());
+/* ---------------- free voice input: Whisper running on this computer (whisper.cpp), no API key ---------------- */
+const VOICE = { dir: () => path.join(app.getPath('userData'), 'whisper'), busy: null };
+const WHISPER_ZIP = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.2/whisper-bin-x64.zip';
+const WHISPER_MODELS = { base: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin', small: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin' };
+function findFile(dir, name) { try { for (const f of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, f.name); if (f.isDirectory()) { const r = findFile(p, name); if (r) return r; } else if (f.name.toLowerCase() === name) return p; } } catch {} return null; }
+function voiceCli() { return findFile(path.join(VOICE.dir(), 'bin'), 'whisper-cli.exe') || findFile(path.join(VOICE.dir(), 'bin'), 'main.exe'); }
+function voiceModel() { for (const m of ['small', 'base']) { const f = path.join(VOICE.dir(), `ggml-${m}.bin`); if (fs.existsSync(f) && fs.statSync(f).size > 5e7) return f; } return null; }
+function voiceEmit(x) { win && !win.isDestroyed() && win.webContents.send('voice-progress', x); }
+async function fetchTo(url, file, label) {
+  const r = await fetch(url); if (!r.ok) throw new Error(label + ': download failed (HTTP ' + r.status + ')');
+  const total = +r.headers.get('content-length') || 0; const tmp = file + '.part'; const out = fs.createWriteStream(tmp); let got = 0, last = 0;
+  for await (const c of r.body) { out.write(c); got += c.length; if (Date.now() - last > 500) { voiceEmit({ label, pct: total ? Math.round(got / total * 100) : 0 }); last = Date.now(); } }
+  await new Promise(ok => out.end(ok)); fs.renameSync(tmp, file);
+}
+async function voiceInstall(model = 'base') {
+  if (VOICE.busy) return VOICE.busy;
+  VOICE.busy = (async () => {
+    const d = VOICE.dir(); fs.mkdirSync(d, { recursive: true });
+    if (!voiceCli()) {
+      const zip = path.join(d, 'whisper.zip'); await fetchTo(WHISPER_ZIP, zip, 'Voice engine');
+      const bin = path.join(d, 'bin'); fs.mkdirSync(bin, { recursive: true });
+      await new Promise((ok, bad) => execFile('tar', ['-xf', zip, '-C', bin], err => err ? bad(new Error('Could not unpack the voice engine: ' + err.message)) : ok()));
+      try { fs.unlinkSync(zip); } catch {}
+      if (!voiceCli()) throw new Error('The voice engine did not unpack correctly.');
+    }
+    const mf = path.join(d, `ggml-${model}.bin`);
+    if (!fs.existsSync(mf)) await fetchTo(WHISPER_MODELS[model] || WHISPER_MODELS.base, mf, 'Voice model');
+    voiceEmit({ label: 'ready', pct: 100 });
+    return { ok: true };
+  })().finally(() => { VOICE.busy = null; });
+  return VOICE.busy;
+}
+ipcMain.handle('voice', async (e, op, a = {}) => {
+  if (op === 'status') return { installed: !!(voiceCli() && voiceModel()), model: voiceModel() ? path.basename(voiceModel()) : null, installing: !!VOICE.busy };
+  if (op === 'install') { try { return await voiceInstall(a.model); } catch (err) { return { ok: false, error: err.message }; } }
+  if (op === 'transcribe') {
+    if (!voiceCli() || !voiceModel()) { const r = await voiceInstall().catch(err => ({ ok: false, error: err.message })); if (r && r.ok === false) return r; }
+    const wav = path.join(os.tmpdir(), 'mininet-voice-' + Date.now() + '.wav');
+    fs.writeFileSync(wav, Buffer.from(a.wav));
+    const threads = String(Math.max(2, Math.min(8, os.cpus().length)));
+    const args = ['-m', voiceModel(), '-f', wav, '-l', a.lang || 'auto', '-nt', '-np', '-t', threads, '-bs', '1', '-bo', '1', ...(a.translate ? ['-tr'] : [])];
+    const runWith = cli => new Promise(res => execFile(cli, args, { windowsHide: true, timeout: 180000, maxBuffer: 4e6, cwd: path.dirname(cli) }, (err, stdout, stderr) => res({ err, stdout, stderr })));
+    const r = await runWith(voiceCli());
+    try { fs.unlinkSync(wav); } catch {}
+    if (r.err) return { ok: false, error: 'Voice engine error: ' + (String(r.stderr || r.err.message).split('\n').filter(Boolean).slice(-2).join(' ')).slice(0, 300) };
+    return { ok: true, text: String(r.stdout).replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim() };
+  }
+  return null;
+});
 /* ---------------- Codex chat (OpenAI Codex CLI on this laptop, driving MiniNet through its MCP tools) ---------------- */
 const codexRun = { proc: null, thread: null };
 function codexDir() { const d = path.join(app.getPath('home'), 'MiniNetCodex'); fs.mkdirSync(d, { recursive: true }); return d; }
@@ -618,15 +672,54 @@ function codexExe() {
   const cands = [path.join(process.env.LOCALAPPDATA || '', 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe'), 'codex'];
   return cands.find(c => c === 'codex' || fs.existsSync(c));
 }
-function codexSend(ev) { win && !win.isDestroyed() && win.webContents.send('codex-event', ev); }
+function codexSend(ev) { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('codex-event', ev); }
+let codexWin = null;
+function openCodexWindow() {
+  if (codexWin && !codexWin.isDestroyed()) { if (codexWin.isMinimized()) codexWin.restore(); codexWin.show(); codexWin.focus(); return; }
+  const csz = fitSize(720, 780);
+  codexWin = new BrowserWindow({ width: csz.width, height: csz.height, center: true, minWidth: 420, minHeight: 420, title: 'MiniNet Codex', backgroundColor: '#120d33', frame: false, icon: path.join(__dirname, 'icon.ico'),
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
+  codexWin.loadFile('codex.html');
+  codexWin.on('closed', () => { codexWin = null; });
+}
+// a desktop icon that opens the Codex chat window straight away (made once)
+function makeCodexShortcut() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  try {
+    const flag = path.join(app.getPath('userData'), '.codex-shortcut-v1'); if (fs.existsSync(flag)) return;
+    const lnk = path.join(app.getPath('desktop'), 'MiniNet Codex.lnk');
+    shell.writeShortcutLink(lnk, 'create', { target: process.execPath, args: '--codex', icon: process.execPath, iconIndex: 0, description: 'Chat with Codex — it works in MiniNet Browser' });
+    fs.writeFileSync(flag, String(Date.now()));
+  } catch (err) { console.error('shortcut', err); }
+}
+const LIMIT_RE = /usage limit|rate limit|quota|limit reached|exceeded your|too many requests|try again (in|at|after)|upgrade to (pro|plus)/i;
+// when Codex hits its limit, MiniNet's own AI (Orbit, e.g. the free local model) carries on with the same job
+async function codexFallback(text) {
+  try {
+    const r = await shellReq('helper', { op: 'start', task: 'The owner asked Codex this, but Codex reached its usage limit, so you take over and do it fully: ' + text + '\nWhen finished, reply with a short report.', by: 'Codex (limit reached)' }, 60000);
+    const name = r && r.started; if (!name) throw new Error('helper did not start');
+    for (let i = 0; i < 180; i++) {
+      await new Promise(z => setTimeout(z, 5000));
+      const list = await shellReq('helper', { op: 'list' }, 30000).catch(() => []);
+      const h = (list || []).find(x => x.name === name);
+      if (h && h.status !== 'running') { codexSend({ type: 'fallback-report', text: h.report || h.error || h.status }); return; }
+    }
+    codexSend({ type: 'fallback-report', text: 'Orbit is still working on it — check the Orbit panel in MiniNet.' });
+  } catch (err) { codexSend({ type: 'error', message: 'Could not hand the job to Orbit: ' + err.message }); }
+}
 ipcMain.handle('codex', async (e, op, a = {}) => {
   if (op === 'status') { try { codexRun.thread = codexRun.thread || fs.readFileSync(path.join(codexDir(), '.mininet-thread'), 'utf8').trim() || null; } catch {} return { running: !!codexRun.proc, thread: codexRun.thread, exe: codexExe(), dir: codexDir() }; }
   if (op === 'new') { codexRun.thread = null; try { fs.unlinkSync(path.join(codexDir(), '.mininet-thread')); } catch {} return true; }
   if (op === 'stop') { const p = codexRun.proc; if (p) { if (process.platform === 'win32') execFile('taskkill', ['/T', '/F', '/PID', String(p.pid)], () => {}); else p.kill(); } return true; }
+  if (op === 'open-window') { openCodexWindow(); return true; }
+  if (op === 'show-browser') { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } return true; }
+  if (op === 'win') { const w = BrowserWindow.fromWebContents(e.sender); if (w) { if (a.op === 'min') w.minimize(); if (a.op === 'close') w.close(); } return true; }
+  if (op === 'fallback') { codexFallback(String(a.text || '')); return true; }
   if (op !== 'send') return null;
   if (codexRun.proc) throw new Error('Codex is still working — wait or press Stop.');
   const prompt = String(a.text || '').trim(); if (!prompt) return false;
-  const common = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"', ...(a.model ? ['-m', String(a.model)] : [])];
+  const common = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"', ...(a.model && /^[\w.\-]+$/.test(a.model) ? ['-m', String(a.model)] : []), ...(/^(low|medium|high|xhigh)$/.test(a.effort || '') ? ['-c', `model_reasoning_effort="${a.effort}"`] : [])];
+  let hitLimit = false;
   const args = codexRun.thread ? ['exec', 'resume', codexRun.thread, ...common, '-'] : ['exec', ...common, '-C', codexDir(), '-'];
   const p = spawn(codexExe(), args, { cwd: codexDir(), windowsHide: true, env: process.env });
   codexRun.proc = p; codexSend({ type: 'start' });
@@ -636,11 +729,15 @@ ipcMain.handle('codex', async (e, op, a = {}) => {
     buf += String(d); const lines = buf.split('\n'); buf = lines.pop();
     for (const l of lines) { let j; try { j = JSON.parse(l); } catch { continue; }
       if (j.type === 'thread.started' && j.thread_id) { codexRun.thread = j.thread_id; try { fs.writeFileSync(path.join(codexDir(), '.mininet-thread'), j.thread_id); } catch {} }
+      const msg = (j.error && j.error.message) || j.message || (j.item && j.item.type === 'error' && j.item.message) || '';
+      if (!hitLimit && msg && LIMIT_RE.test(msg)) { hitLimit = true; codexSend({ type: 'limit', message: msg }); }
       codexSend(j); }
   });
   p.stderr.on('data', d => { err += String(d); if (err.length > 4000) err = err.slice(-4000); });
   p.on('error', er => { codexRun.proc = null; codexSend({ type: 'error', message: 'Could not start Codex: ' + er.message + '. Is the Codex CLI installed and signed in?' }); });
-  p.on('exit', code => { codexRun.proc = null; const tail = err.split('\n').filter(x => x.trim() && !/Reading additional input/.test(x)).slice(-3).join(' '); codexSend({ type: 'end', code, error: code ? (tail || 'Codex stopped (code ' + code + ')') : '' }); });
+  p.on('exit', code => { codexRun.proc = null; const tail = err.split('\n').filter(x => x.trim() && !/Reading additional input/.test(x)).slice(-3).join(' ');
+    if (!hitLimit && code && LIMIT_RE.test(tail)) { hitLimit = true; codexSend({ type: 'limit', message: tail.slice(0, 300) }); }
+    codexSend({ type: 'end', code, limit: hitLimit, error: code ? (tail || 'Codex stopped (code ' + code + ')') : '' }); });
   return true;
 });
 ipcMain.handle('business', async (e, op, a = {}) => {
@@ -712,6 +809,8 @@ app.whenReady().then(async () => {
   try { writeBridge(); } catch (err) { console.error('bridge', err); }
   createWindow();
   initMail();
+  makeCodexShortcut();
+  if (process.argv.includes('--codex')) { win.once('ready-to-show', () => win.minimize()); setTimeout(() => { if (win && !win.isMinimized()) win.minimize(); }, 2500); openCodexWindow(); }
   agent.init({
     userData: app.getPath('userData'),
     shell: shellReq,
